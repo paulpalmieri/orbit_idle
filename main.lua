@@ -46,6 +46,14 @@ local PLANET_IMPULSE_TARGET_BOOST = PLANET_IMPULSE_MULTIPLIER - 1
 local PLANET_IMPULSE_DURATION = 10
 local PLANET_IMPULSE_RISE_RATE = 4.5
 local PLANET_IMPULSE_FALL_RATE = 6.5
+local PLANET_BOUNCE_DURATION = 0.12
+local SPEED_WAVE_COST = 25
+local SPEED_WAVE_CLICK_THRESHOLD = 10
+local SPEED_WAVE_MULTIPLIER = 1.5
+local SPEED_WAVE_DURATION = 5
+local SPEED_WAVE_RIPPLE_LIFETIME = 1.1
+local SPEED_WAVE_RIPPLE_MAX_RADIUS = 120
+local SPEED_WAVE_TEXT_LIFETIME = 0.6
 local ORBIT_POP_LIFETIME = 1.44
 local PLANET_COLOR_CYCLE_SECONDS = 30
 local UI_FONT_SIZE = 18
@@ -122,11 +130,18 @@ local state = {
   selectedOrbiter = nil,
   borderlessFullscreen = false,
   orbitPopTexts = {},
+  planetBounceTime = 0,
+  speedWaveUnlocked = false,
+  planetClickCount = 0,
+  speedWaveTimer = 0,
+  speedWaveRipples = {},
+  speedWaveText = nil,
 }
 
 local ui = {
   buyMoonBtn = {x = 8, y = 0, w = 140, h = 0},
   buySatelliteBtn = {x = 154, y = 0, w = 180, h = 0},
+  speedWaveBtn = {x = 340, y = 0, w = 192, h = 0},
   moonAddSatelliteBtn = {x = 0, y = 0, w = 0, h = 0, visible = false, enabled = false},
 }
 
@@ -297,6 +312,10 @@ local function moonCost()
     return 0
   end
   return 5
+end
+
+local function speedWaveCost()
+  return SPEED_WAVE_COST
 end
 
 local function createOrbitalParams(config, index)
@@ -531,6 +550,65 @@ local function triggerPlanetImpulse()
   return true
 end
 
+local function spawnModifierRipple()
+  state.speedWaveRipples[#state.speedWaveRipples + 1] = {
+    age = 0,
+    life = SPEED_WAVE_RIPPLE_LIFETIME,
+  }
+end
+
+local function speedWaveBoostFor(orbiter)
+  if state.speedWaveTimer <= 0 then
+    return 0
+  end
+  if not orbiter then
+    return 0
+  end
+  if orbiter.kind == "satellite" or orbiter.kind == "moon-satellite" then
+    return SPEED_WAVE_MULTIPLIER - 1
+  end
+  return 0
+end
+
+local function triggerSpeedWave()
+  state.speedWaveTimer = SPEED_WAVE_DURATION
+  spawnModifierRipple()
+  local mx, my = love.mouse.getPosition()
+  local gx, gy = toGameSpace(mx, my)
+  state.speedWaveText = {
+    x = gx,
+    y = gy,
+    age = 0,
+    life = SPEED_WAVE_TEXT_LIFETIME,
+  }
+end
+
+local function buySpeedWave()
+  if state.speedWaveUnlocked then
+    return false
+  end
+  local cost = speedWaveCost()
+  if state.orbits < cost then
+    return false
+  end
+  state.orbits = state.orbits - cost
+  state.speedWaveUnlocked = true
+  state.planetClickCount = 0
+  return true
+end
+
+local function onPlanetClicked()
+  state.planetBounceTime = PLANET_BOUNCE_DURATION
+  triggerPlanetImpulse()
+  if not state.speedWaveUnlocked then
+    return
+  end
+  state.planetClickCount = state.planetClickCount + 1
+  if state.planetClickCount % SPEED_WAVE_CLICK_THRESHOLD == 0 then
+    triggerSpeedWave()
+  end
+end
+
 local function drawCircle(x, y, r, color, lightScale, alphaScale)
   setColorScaled(color, lightScale, alphaScale)
   love.graphics.circle("fill", x, y, r, 18)
@@ -582,8 +660,31 @@ end
 
 local function drawPlanet()
   local r, g, b = currentPlanetColor()
+  local t = 1 - clamp(state.planetBounceTime / PLANET_BOUNCE_DURATION, 0, 1)
+  local kick = math.sin(t * math.pi)
+  local bounceScale = 1 + kick * 0.14 * (1 - t)
   setColorDirect(r, g, b, 1)
+  love.graphics.push()
+  love.graphics.translate(cx, cy)
+  love.graphics.scale(bounceScale, bounceScale)
+  love.graphics.translate(-cx, -cy)
   love.graphics.circle("fill", cx, cy, BODY_VISUAL.planetRadius, 36)
+  love.graphics.pop()
+end
+
+local function drawSpeedWaveRipples()
+  local ripples = state.speedWaveRipples
+  for i = 1, #ripples do
+    local ripple = ripples[i]
+    local t = clamp(ripple.age / ripple.life, 0, 1)
+    local radius = BODY_VISUAL.planetRadius + t * SPEED_WAVE_RIPPLE_MAX_RADIUS
+    local alpha = (1 - smoothstep(t)) * 0.9
+    local brightness = 1 - t
+    setColorBlendScaled(swatch.brightest, swatch.dim, 1 - brightness, 1, alpha)
+    love.graphics.setLineWidth(2 - t * 0.8)
+    love.graphics.circle("line", cx, cy, radius, 64)
+  end
+  love.graphics.setLineWidth(1)
 end
 
 local function drawOrbitalTrail(orbiter, trailLen, headAlpha, tailAlpha)
@@ -614,7 +715,13 @@ local function drawOrbitalTrail(orbiter, trailLen, headAlpha, tailAlpha)
 end
 
 local function hasActiveBoost(orbiter)
-  return orbiter and orbiter.boostDurations and #orbiter.boostDurations > 0
+  if not orbiter then
+    return false
+  end
+  if orbiter.boostDurations and #orbiter.boostDurations > 0 then
+    return true
+  end
+  return speedWaveBoostFor(orbiter) > 0
 end
 
 local function drawMoon(moon)
@@ -663,6 +770,8 @@ local function drawHud()
   ui.buyMoonBtn.h = btnH
   ui.buySatelliteBtn.y = btnY
   ui.buySatelliteBtn.h = btnH
+  ui.speedWaveBtn.y = btnY
+  ui.speedWaveBtn.h = btnH
 
   love.graphics.setColor(palette.text)
   drawText("ORB " .. tostring(state.orbits), 8, hudY)
@@ -686,6 +795,18 @@ local function drawHud()
   love.graphics.circle("line", ui.buySatelliteBtn.x + 8, ui.buySatelliteBtn.y + btnH * 0.5, 5.2, 12)
   setColorScaled(palette.text, 1, satAlpha)
   drawText("SAT 1 MOON", ui.buySatelliteBtn.x + 18, ui.buySatelliteBtn.y + 4)
+
+  local speedWaveReady = state.speedWaveUnlocked or state.orbits >= speedWaveCost()
+  local waveAlpha = speedWaveReady and 1 or 0.45
+  setColorScaled(palette.accent, 1, waveAlpha)
+  love.graphics.circle("line", ui.speedWaveBtn.x + 8, ui.speedWaveBtn.y + btnH * 0.5, 5.2, 12)
+  setColorScaled(palette.text, 1, waveAlpha)
+  if state.speedWaveUnlocked then
+    local waveStatus = state.speedWaveTimer > 0 and "ON" or tostring(state.planetClickCount % SPEED_WAVE_CLICK_THRESHOLD) .. "/" .. tostring(SPEED_WAVE_CLICK_THRESHOLD)
+    drawText("SPEED WAVE " .. waveStatus, ui.speedWaveBtn.x + 18, ui.speedWaveBtn.y + 4)
+  else
+    drawText("SPEED WAVE " .. tostring(speedWaveCost()), ui.speedWaveBtn.x + 18, ui.speedWaveBtn.y + 4)
+  end
 
   love.graphics.setColor(palette.muted)
   local helpY1 = GAME_H - lineH * 2 - 8
@@ -759,6 +880,18 @@ local function drawOrbiterTooltip()
   end
 end
 
+local function drawSpeedWaveText()
+  local popup = state.speedWaveText
+  if not popup then
+    return
+  end
+  local t = clamp(popup.age / popup.life, 0, 1)
+  local alpha = 1 - smoothstep(t)
+  local yLift = t * 12
+  setColorDirect(swatch.brightest[1], swatch.brightest[2], swatch.brightest[3], alpha)
+  drawText("SPEED WAVE", popup.x + 8, popup.y - 10 - yLift)
+end
+
 function love.load()
   love.graphics.setDefaultFilter("nearest", "nearest")
   uiFont = love.graphics.newFont("font.ttf", UI_FONT_SIZE, "mono")
@@ -801,7 +934,25 @@ end
 function love.update(dt)
   dt = math.min(dt, 0.05)
   state.time = state.time + dt
+  state.planetBounceTime = math.max(0, state.planetBounceTime - dt)
+  state.speedWaveTimer = math.max(0, state.speedWaveTimer - dt)
   updateOrbitGainFx(dt)
+
+  local ripples = state.speedWaveRipples
+  for i = #ripples, 1, -1 do
+    local ripple = ripples[i]
+    ripple.age = ripple.age + dt
+    if ripple.age >= ripple.life then
+      table.remove(ripples, i)
+    end
+  end
+
+  if state.speedWaveText then
+    state.speedWaveText.age = state.speedWaveText.age + dt
+    if state.speedWaveText.age >= state.speedWaveText.life then
+      state.speedWaveText = nil
+    end
+  end
 
   for _, moon in ipairs(state.moons) do
     local prev = moon.angle
@@ -824,7 +975,8 @@ function love.update(dt)
     local childSatellites = moon.childSatellites or {}
     for _, child in ipairs(childSatellites) do
       local prev = child.angle
-      local effectiveSpeed = child.speed * (1 + child.boost)
+      local totalBoost = child.boost + speedWaveBoostFor(child)
+      local effectiveSpeed = child.speed * (1 + totalBoost)
       child.angle = child.angle + effectiveSpeed * dt
       child.boost = clamp(child.boost - 0.60 * dt, 0, 1.2)
       local cp = math.cos(child.plane)
@@ -850,7 +1002,8 @@ function love.update(dt)
   for _, satellite in ipairs(state.satellites) do
     local prev = satellite.angle
     updateOrbiterBoost(satellite, dt)
-    local effectiveSpeed = satellite.speed * (1 + satellite.boost)
+    local totalBoost = satellite.boost + speedWaveBoostFor(satellite)
+    local effectiveSpeed = satellite.speed * (1 + totalBoost)
 
     satellite.angle = satellite.angle + effectiveSpeed * dt
 
@@ -891,6 +1044,11 @@ function love.mousepressed(x, y, button)
     return
   end
 
+  if gx >= ui.speedWaveBtn.x and gx <= ui.speedWaveBtn.x + ui.speedWaveBtn.w and gy >= ui.speedWaveBtn.y and gy <= ui.speedWaveBtn.y + ui.speedWaveBtn.h then
+    buySpeedWave()
+    return
+  end
+
   if ui.moonAddSatelliteBtn.visible and gx >= ui.moonAddSatelliteBtn.x and gx <= ui.moonAddSatelliteBtn.x + ui.moonAddSatelliteBtn.w and gy >= ui.moonAddSatelliteBtn.y and gy <= ui.moonAddSatelliteBtn.y + ui.moonAddSatelliteBtn.h then
     if ui.moonAddSatelliteBtn.enabled then
       addSatelliteToMoon(state.selectedOrbiter)
@@ -903,7 +1061,7 @@ function love.mousepressed(x, y, button)
   local planetDy = wy - cy
   local planetHitR = BODY_VISUAL.planetRadius
   if planetDx * planetDx + planetDy * planetDy <= planetHitR * planetHitR then
-    triggerPlanetImpulse()
+    onPlanetClicked()
     return
   end
 
@@ -976,6 +1134,7 @@ function love.draw()
     drawSatellite(s)
   end
   drawPlanet()
+  drawSpeedWaveRipples()
   drawSelectedOrbit(true)
   for _, s in ipairs(satFront) do
     drawSatellite(s)
@@ -986,6 +1145,7 @@ function love.draw()
   love.graphics.pop()
 
   drawOrbitGainFx()
+  drawSpeedWaveText()
   drawOrbiterTooltip()
   drawHud()
 
