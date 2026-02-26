@@ -61,6 +61,9 @@ local ORBIT_ICON_CYCLE_SECONDS = 1.8
 local ORBIT_ICON_FLATTEN = 0.84
 local ORBIT_ICON_SIZE = 6
 local UI_FONT_SIZE = 24
+local MOON_COST = 50
+local SATELLITE_COST = 5
+local MOON_SATELLITE_COST = 10
 local MAX_MOONS = 5
 local MAX_SATELLITES = 20
 local BG_MUSIC_VOLUME = 0.72
@@ -152,7 +155,6 @@ local state = {
   orbits = 100,
   moons = {},
   satellites = {},
-  moonsPurchased = 0,
   stars = {},
   time = 0,
   selectedOrbiter = nil,
@@ -377,10 +379,15 @@ local function drawOrbitGainFx()
 end
 
 local function moonCost()
-  if state.moonsPurchased == 0 then
-    return 0
-  end
-  return 5
+  return MOON_COST
+end
+
+local function satelliteCost()
+  return SATELLITE_COST
+end
+
+local function moonSatelliteCost()
+  return MOON_SATELLITE_COST
 end
 
 local function speedWaveCost()
@@ -516,7 +523,6 @@ local function addMoon()
 
   updateOrbiterPosition(moon)
   table.insert(state.moons, moon)
-  state.moonsPurchased = state.moonsPurchased + 1
   return true
 end
 
@@ -525,11 +531,12 @@ local function addSatellite()
     return false
   end
 
-  if #state.moons < 1 then
+  local cost = satelliteCost()
+  if state.orbits < cost then
     return false
   end
 
-  table.remove(state.moons, #state.moons)
+  state.orbits = state.orbits - cost
 
   local satIndex = #state.satellites
   local orbital = createOrbitalParams(ORBIT_CONFIGS.satellite, satIndex)
@@ -559,16 +566,12 @@ local function addSatelliteToMoon(moon)
     return false
   end
 
-  if #state.satellites < 3 then
+  local cost = moonSatelliteCost()
+  if state.orbits < cost then
     return false
   end
 
-  for _ = 1, 3 do
-    local removedSatellite = table.remove(state.satellites, #state.satellites)
-    if state.selectedOrbiter == removedSatellite then
-      state.selectedOrbiter = nil
-    end
-  end
+  state.orbits = state.orbits - cost
 
   moon.childSatellites = moon.childSatellites or {}
   local childIndex = #moon.childSatellites
@@ -907,9 +910,12 @@ local function drawMoon(moon)
   end
 
   local childSatellites = moon.childSatellites or {}
+  local showChildOrbitPaths = state.selectedOrbiter == moon
   love.graphics.setLineWidth(1)
-  for _, child in ipairs(childSatellites) do
-    drawChildOrbitPath(child, false)
+  if showChildOrbitPaths then
+    for _, child in ipairs(childSatellites) do
+      drawChildOrbitPath(child, false)
+    end
   end
 
   local function drawChild(child)
@@ -932,8 +938,10 @@ local function drawMoon(moon)
   setColorDirect(moonR, moonG, moonB, 1)
   love.graphics.circle("fill", moon.x, moon.y, BODY_VISUAL.moonRadius, 18)
 
-  for _, child in ipairs(childSatellites) do
-    drawChildOrbitPath(child, true)
+  if showChildOrbitPaths then
+    for _, child in ipairs(childSatellites) do
+      drawChildOrbitPath(child, true)
+    end
   end
 
   for _, child in ipairs(childSatellites) do
@@ -1011,13 +1019,13 @@ local function drawHud()
       end
     end
     y = y + rowH + gap
+    return hovered
   end
 
   local moonBuyCost = moonCost()
   local canBuyMoon = state.orbits >= moonBuyCost and #state.moons < MAX_MOONS
-  local moonCostText = moonBuyCost == 0 and "free" or tostring(moonBuyCost)
-  local canBuySatellite = #state.moons >= 1 and #state.satellites < MAX_SATELLITES
-  local satelliteStatus = #state.moons < 1 and "need moon" or tostring(#state.satellites) .. "/" .. tostring(MAX_SATELLITES)
+  local canBuySatellite = #state.satellites < MAX_SATELLITES and state.orbits >= satelliteCost()
+  local satelliteStatus = tostring(satelliteCost())
   local speedWaveReady = state.speedWaveUnlocked or state.orbits >= speedWaveCost()
   local speedClickReady = state.speedClickUnlocked or state.orbits >= speedClickCost()
   local waveStatus = state.speedWaveUnlocked and (state.speedWaveTimer > 0 and "on" or tostring(state.planetClickCount % SPEED_WAVE_CLICK_THRESHOLD) .. "/" .. tostring(SPEED_WAVE_CLICK_THRESHOLD)) or tostring(speedWaveCost())
@@ -1030,17 +1038,93 @@ local function drawHud()
   love.graphics.setScissor(panelX + 1, panelY + 1, panelW - 2, panelH - 2)
 
   drawHeader("generators")
-  drawRow(ui.buyMoonBtn, "moon", moonCostText, canBuyMoon, moonBuyCost > 0)
+  drawRow(ui.buyMoonBtn, "moon", tostring(moonBuyCost), canBuyMoon, true)
   drawRow(ui.buySatelliteBtn, "satellite", satelliteStatus, canBuySatellite)
 
   drawHeader("upgrades")
-  drawRow(ui.speedWaveBtn, "speed wave", waveStatus, speedWaveReady, not state.speedWaveUnlocked)
-  drawRow(ui.speedClickBtn, "speed click", clickStatus, speedClickReady, not state.speedClickUnlocked)
+  local hoveredUpgradeTitle
+  local hoveredUpgradeLines
+  local hoveredUpgradeBtn
+  local waveHovered = drawRow(ui.speedWaveBtn, "speed wave", waveStatus, speedWaveReady, not state.speedWaveUnlocked)
+  if waveHovered then
+    hoveredUpgradeTitle = "speed wave"
+    hoveredUpgradeBtn = ui.speedWaveBtn
+    hoveredUpgradeLines = {
+      {
+        pre = "Satellites and moon satellites get ",
+        hi = string.format("+%d%% speed for %ds", math.floor((SPEED_WAVE_MULTIPLIER - 1) * 100 + 0.5), SPEED_WAVE_DURATION),
+        post = ".",
+      },
+      {
+        pre = "Re-triggering refreshes duration; ",
+        hi = "it does not stack",
+        post = ".",
+      },
+    }
+  end
+  local clickHovered = drawRow(ui.speedClickBtn, "speed click", clickStatus, speedClickReady, not state.speedClickUnlocked)
+  if clickHovered then
+    hoveredUpgradeTitle = "speed click"
+    hoveredUpgradeBtn = ui.speedClickBtn
+    hoveredUpgradeLines = {
+      {
+        pre = "Planet clicks apply ",
+        hi = string.format("+%d%% speed for %ds", math.floor(PLANET_IMPULSE_TARGET_BOOST * 100 + 0.5), PLANET_IMPULSE_DURATION),
+        post = " to a random orbiter.",
+      },
+      {
+        pre = "Repeated hits on the same target ",
+        hi = "stack",
+        post = ".",
+      },
+    }
+  end
 
   local descAlpha = state.speedClickUnlocked and 1 or 0.58
   setColorScaled(palette.text, 1, descAlpha)
   drawText("planet clicks accelerate a random orbiter", panelX + padX, y)
   love.graphics.setScissor()
+
+  if hoveredUpgradeTitle and hoveredUpgradeLines and hoveredUpgradeBtn then
+    local tipPadX = math.floor(8 * uiScale)
+    local tipPadY = math.floor(6 * uiScale)
+    local tipGap = math.floor(2 * uiScale)
+    local tipLineH = lineH
+    local tipW = 0
+    for i = 1, #hoveredUpgradeLines do
+      local line = hoveredUpgradeLines[i]
+      local lineW = font:getWidth(line.pre or "") + font:getWidth(line.hi or "") + font:getWidth(line.post or "")
+      tipW = math.max(tipW, lineW)
+    end
+    tipW = tipW + tipPadX * 2
+    local tipH = tipPadY * 2 + tipLineH * #hoveredUpgradeLines + tipGap * math.max(0, #hoveredUpgradeLines - 1)
+    local tipX = hoveredUpgradeBtn.x + hoveredUpgradeBtn.w + math.floor(10 * uiScale)
+    local tipY = hoveredUpgradeBtn.y
+    local viewportRight = offsetX + GAME_W * scale
+    local viewportBottom = offsetY + GAME_H * scale
+    if tipX + tipW > viewportRight - 4 then
+      tipX = hoveredUpgradeBtn.x - tipW - math.floor(10 * uiScale)
+    end
+    tipX = clamp(tipX, offsetX + 4, viewportRight - tipW - 4)
+
+    setColorScaled(palette.space, 1, 0.92)
+    love.graphics.rectangle("fill", tipX + 2, tipY + 2, tipW, tipH)
+    setColorScaled(swatch.brightest, 1, 0.96)
+    love.graphics.rectangle("fill", tipX, tipY, tipW, tipH)
+    for i = 1, #hoveredUpgradeLines do
+      local line = hoveredUpgradeLines[i]
+      local lineY = tipY + tipPadY + (i - 1) * (tipLineH + tipGap)
+      local lineX = tipX + tipPadX
+      setColorScaled(palette.space, 1, 0.85)
+      drawText(line.pre or "", lineX, lineY)
+      lineX = lineX + font:getWidth(line.pre or "")
+      setColorScaled(swatch.bright, 1, 1)
+      drawText(line.hi or "", lineX, lineY)
+      lineX = lineX + font:getWidth(line.hi or "")
+      setColorScaled(palette.space, 1, 0.85)
+      drawText(line.post or "", lineX, lineY)
+    end
+  end
 
   love.graphics.setColor(palette.muted)
   local viewportBottom = offsetY + GAME_H * scale
@@ -1139,7 +1223,7 @@ local function drawOrbiterTooltip()
     local btnH = layout.lineH + math.floor(6 * layout.uiScale)
     local btnX = layout.boxX
     local btnY = layout.boxY + layout.boxH + math.floor(3 * layout.uiScale)
-    local canAddSatellite = #state.satellites >= 3
+    local canAddSatellite = state.orbits >= moonSatelliteCost()
     local btnAlpha = canAddSatellite and 1 or 0.45
 
     ui.moonAddSatelliteBtn.x = btnX
@@ -1154,7 +1238,7 @@ local function drawOrbiterTooltip()
     setColorDirect(pr, pg, pb, 0.72 * btnAlpha)
     love.graphics.rectangle("line", btnX, btnY, btnW, btnH)
     setColorDirect(pr, pg, pb, btnAlpha)
-    drawText("add sat -3 s", btnX + math.floor(6 * layout.uiScale), btnY + math.floor(3 * layout.uiScale))
+    drawText("add sat -" .. tostring(moonSatelliteCost()) .. " o", btnX + math.floor(6 * layout.uiScale), btnY + math.floor(3 * layout.uiScale))
   end
 end
 
@@ -1433,12 +1517,8 @@ function love.mousepressed(x, y, button)
   end
 
   if x >= ui.buySatelliteBtn.x and x <= ui.buySatelliteBtn.x + ui.buySatelliteBtn.w and y >= ui.buySatelliteBtn.y and y <= ui.buySatelliteBtn.y + ui.buySatelliteBtn.h then
-    local removedMoon = state.moons[#state.moons]
     if addSatellite() then
       playMenuBuyClickFx()
-      if state.selectedOrbiter == removedMoon then
-        state.selectedOrbiter = nil
-      end
     end
     return
   end
