@@ -9,6 +9,7 @@ local ORBIT_CONFIGS = {
     bandCapacity = 4,
     baseRadius = 100,
     bandStep = 34,
+    fixedAltitude = true,
     tiltMin = 0.35,
     tiltRange = 1.1,
     speedMin = 0.42,
@@ -16,8 +17,9 @@ local ORBIT_CONFIGS = {
   },
   satellite = {
     bandCapacity = 6,
-    baseRadius = 68,
-    bandStep = 20,
+    baseRadius = 40,
+    bandStep = 8,
+    fixedAltitude = true,
     tiltMin = 0.30,
     tiltRange = 1.2,
     speedMin = 0.70,
@@ -35,7 +37,7 @@ local ORBIT_CONFIGS = {
 }
 local BODY_VISUAL = {
   planetRadius = 30,
-  moonRadius = 6,
+  moonRadius = 10,
   satelliteRadius = 4,
   moonChildSatelliteRadius = 1.8,
 }
@@ -47,6 +49,8 @@ local PLANET_IMPULSE_FALL_RATE = 6.5
 local ORBIT_POP_LIFETIME = 1.44
 local PLANET_COLOR_CYCLE_SECONDS = 30
 local UI_FONT_SIZE = 18
+local MAX_MOONS = 5
+local MAX_SATELLITES = 20
 
 local canvas
 local uiFont
@@ -296,11 +300,12 @@ local function moonCost()
 end
 
 local function createOrbitalParams(config, index)
-  local band = math.floor(index / config.bandCapacity)
+  local band = config.fixedAltitude and 0 or math.floor(index / config.bandCapacity)
+  local radiusJitter = config.fixedAltitude and 0 or (love.math.random() * 2 - 1)
   local tilt = config.tiltMin + love.math.random() * config.tiltRange
   return {
     angle = love.math.random() * math.pi * 2,
-    radius = config.baseRadius + band * config.bandStep + love.math.random() * 2 - 1,
+    radius = config.baseRadius + band * config.bandStep + radiusJitter,
     flatten = math.cos(tilt),
     depthScale = math.sin(tilt),
     plane = love.math.random() * math.pi * 2,
@@ -361,6 +366,10 @@ end
 local updateOrbiterPosition
 
 local function addMoon()
+  if #state.moons >= MAX_MOONS then
+    return
+  end
+
   local cost = moonCost()
   if state.orbits < cost then
     return
@@ -393,6 +402,10 @@ local function addMoon()
 end
 
 local function addSatellite()
+  if #state.satellites >= MAX_SATELLITES then
+    return
+  end
+
   if #state.moons < 1 then
     return
   end
@@ -654,10 +667,10 @@ local function drawHud()
   love.graphics.setColor(palette.text)
   drawText("ORB " .. tostring(state.orbits), 8, hudY)
   love.graphics.setColor(palette.muted)
-  drawText("M " .. tostring(#state.moons) .. "  S " .. tostring(#state.satellites), 160, hudY)
+  drawText("M " .. tostring(#state.moons) .. "/" .. tostring(MAX_MOONS) .. "  S " .. tostring(#state.satellites) .. "/" .. tostring(MAX_SATELLITES), 160, hudY)
 
   local moonBuyCost = moonCost()
-  local canBuyMoon = state.orbits >= moonBuyCost
+  local canBuyMoon = state.orbits >= moonBuyCost and #state.moons < MAX_MOONS
   local moonAlpha = canBuyMoon and 1 or 0.45
   setColorScaled(palette.moonFront, 1, moonAlpha)
   love.graphics.circle("fill", ui.buyMoonBtn.x + 8, ui.buyMoonBtn.y + btnH * 0.5, 4, 12)
@@ -665,7 +678,7 @@ local function drawHud()
   local moonCostText = moonBuyCost == 0 and "FREE" or tostring(moonBuyCost)
   drawText("MOON " .. moonCostText, ui.buyMoonBtn.x + 18, ui.buyMoonBtn.y + 4)
 
-  local canBuySatellite = #state.moons >= 1
+  local canBuySatellite = #state.moons >= 1 and #state.satellites < MAX_SATELLITES
   local satAlpha = canBuySatellite and 1 or 0.45
   setColorScaled(palette.satelliteFront, 1, satAlpha)
   love.graphics.circle("fill", ui.buySatelliteBtn.x + 8, ui.buySatelliteBtn.y + btnH * 0.5, 3.2, 12)
