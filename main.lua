@@ -48,6 +48,7 @@ local PLANET_IMPULSE_RISE_RATE = 4.5
 local PLANET_IMPULSE_FALL_RATE = 6.5
 local PLANET_BOUNCE_DURATION = 0.12
 local SPEED_WAVE_COST = 25
+local SPEED_CLICK_COST = 15
 local SPEED_WAVE_CLICK_THRESHOLD = 10
 local SPEED_WAVE_MULTIPLIER = 1.5
 local SPEED_WAVE_DURATION = 5
@@ -132,6 +133,7 @@ local state = {
   orbitPopTexts = {},
   planetBounceTime = 0,
   speedWaveUnlocked = false,
+  speedClickUnlocked = false,
   planetClickCount = 0,
   speedWaveTimer = 0,
   speedWaveRipples = {},
@@ -139,9 +141,10 @@ local state = {
 }
 
 local ui = {
-  buyMoonBtn = {x = 8, y = 0, w = 140, h = 0},
-  buySatelliteBtn = {x = 154, y = 0, w = 180, h = 0},
-  speedWaveBtn = {x = 340, y = 0, w = 192, h = 0},
+  buyMoonBtn = {x = 0, y = 0, w = 0, h = 0},
+  buySatelliteBtn = {x = 0, y = 0, w = 0, h = 0},
+  speedWaveBtn = {x = 0, y = 0, w = 0, h = 0},
+  speedClickBtn = {x = 0, y = 0, w = 0, h = 0},
   moonAddSatelliteBtn = {x = 0, y = 0, w = 0, h = 0, visible = false, enabled = false},
 }
 
@@ -316,6 +319,10 @@ end
 
 local function speedWaveCost()
   return SPEED_WAVE_COST
+end
+
+local function speedClickCost()
+  return SPEED_CLICK_COST
 end
 
 local function createOrbitalParams(config, index)
@@ -597,9 +604,24 @@ local function buySpeedWave()
   return true
 end
 
+local function buySpeedClick()
+  if state.speedClickUnlocked then
+    return false
+  end
+  local cost = speedClickCost()
+  if state.orbits < cost then
+    return false
+  end
+  state.orbits = state.orbits - cost
+  state.speedClickUnlocked = true
+  return true
+end
+
 local function onPlanetClicked()
   state.planetBounceTime = PLANET_BOUNCE_DURATION
-  triggerPlanetImpulse()
+  if state.speedClickUnlocked then
+    triggerPlanetImpulse()
+  end
   if not state.speedWaveUnlocked then
     return
   end
@@ -762,51 +784,78 @@ end
 local function drawHud()
   local font = love.graphics.getFont()
   local lineH = math.floor(font:getHeight())
-  local hudY = 8
-  local btnY = hudY + lineH + 4
-  local btnH = lineH + 8
+  local panelX = 8
+  local panelY = 8
+  local panelW = 360
+  local padX = 10
+  local rowH = lineH + 8
+  local gap = 4
+  local y = panelY + 8
 
-  ui.buyMoonBtn.y = btnY
-  ui.buyMoonBtn.h = btnH
-  ui.buySatelliteBtn.y = btnY
-  ui.buySatelliteBtn.h = btnH
-  ui.speedWaveBtn.y = btnY
-  ui.speedWaveBtn.h = btnH
+  local function drawHeader(text)
+    love.graphics.setColor(palette.text)
+    drawText(text, panelX + padX, y)
+    y = y + lineH + 4
+  end
 
-  love.graphics.setColor(palette.text)
-  drawText("ORB " .. tostring(state.orbits), 8, hudY)
-  love.graphics.setColor(palette.muted)
-  drawText("M " .. tostring(#state.moons) .. "/" .. tostring(MAX_MOONS) .. "  S " .. tostring(#state.satellites) .. "/" .. tostring(MAX_SATELLITES), 160, hudY)
+  local function drawRow(btn, label, status, enabled)
+    btn.x = panelX + padX
+    btn.y = y
+    btn.w = panelW - padX * 2
+    btn.h = rowH
+    local alpha = enabled and 1 or 0.40
+    setColorScaled(palette.nebulaA or palette.space, 1, 0.85)
+    love.graphics.rectangle("fill", btn.x, btn.y, btn.w, btn.h)
+    setColorScaled(palette.panelEdge, 1, alpha)
+    love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h)
+    setColorScaled(palette.text, 1, alpha)
+    drawText(label, btn.x + 8, btn.y + 4)
+    if status and status ~= "" then
+      local sw = font:getWidth(status)
+      drawText(status, btn.x + btn.w - sw - 8, btn.y + 4)
+    end
+    y = y + rowH + gap
+  end
 
   local moonBuyCost = moonCost()
   local canBuyMoon = state.orbits >= moonBuyCost and #state.moons < MAX_MOONS
-  local moonAlpha = canBuyMoon and 1 or 0.45
-  setColorScaled(palette.moonFront, 1, moonAlpha)
-  love.graphics.circle("fill", ui.buyMoonBtn.x + 8, ui.buyMoonBtn.y + btnH * 0.5, 4, 12)
-  setColorScaled(palette.text, 1, moonAlpha)
-  local moonCostText = moonBuyCost == 0 and "FREE" or tostring(moonBuyCost)
-  drawText("MOON " .. moonCostText, ui.buyMoonBtn.x + 18, ui.buyMoonBtn.y + 4)
-
+  local moonCostText = moonBuyCost == 0 and "FREE" or tostring(moonBuyCost) .. " ORB"
   local canBuySatellite = #state.moons >= 1 and #state.satellites < MAX_SATELLITES
-  local satAlpha = canBuySatellite and 1 or 0.45
-  setColorScaled(palette.satelliteFront, 1, satAlpha)
-  love.graphics.circle("fill", ui.buySatelliteBtn.x + 8, ui.buySatelliteBtn.y + btnH * 0.5, 3.2, 12)
-  setColorScaled(palette.satelliteFront, 1, satAlpha * 0.60)
-  love.graphics.circle("line", ui.buySatelliteBtn.x + 8, ui.buySatelliteBtn.y + btnH * 0.5, 5.2, 12)
-  setColorScaled(palette.text, 1, satAlpha)
-  drawText("SAT 1 MOON", ui.buySatelliteBtn.x + 18, ui.buySatelliteBtn.y + 4)
-
+  local satelliteStatus = #state.moons < 1 and "NEED MOON" or tostring(#state.satellites) .. "/" .. tostring(MAX_SATELLITES)
   local speedWaveReady = state.speedWaveUnlocked or state.orbits >= speedWaveCost()
-  local waveAlpha = speedWaveReady and 1 or 0.45
-  setColorScaled(palette.accent, 1, waveAlpha)
-  love.graphics.circle("line", ui.speedWaveBtn.x + 8, ui.speedWaveBtn.y + btnH * 0.5, 5.2, 12)
-  setColorScaled(palette.text, 1, waveAlpha)
-  if state.speedWaveUnlocked then
-    local waveStatus = state.speedWaveTimer > 0 and "ON" or tostring(state.planetClickCount % SPEED_WAVE_CLICK_THRESHOLD) .. "/" .. tostring(SPEED_WAVE_CLICK_THRESHOLD)
-    drawText("SPEED WAVE " .. waveStatus, ui.speedWaveBtn.x + 18, ui.speedWaveBtn.y + 4)
-  else
-    drawText("SPEED WAVE " .. tostring(speedWaveCost()), ui.speedWaveBtn.x + 18, ui.speedWaveBtn.y + 4)
-  end
+  local speedClickReady = state.speedClickUnlocked or state.orbits >= speedClickCost()
+  local waveStatus = state.speedWaveUnlocked and (state.speedWaveTimer > 0 and "ON" or tostring(state.planetClickCount % SPEED_WAVE_CLICK_THRESHOLD) .. "/" .. tostring(SPEED_WAVE_CLICK_THRESHOLD)) or tostring(speedWaveCost()) .. " ORB"
+  local clickStatus = state.speedClickUnlocked and "OWNED" or tostring(speedClickCost()) .. " ORB"
+
+  local sectionCount = 2
+  local rowCount = 4
+  local panelH = 8 + lineH + 6 + sectionCount * (lineH + 4) + rowCount * (rowH + gap) + 6
+
+  setColorScaled(palette.space, 1, 0.85)
+  love.graphics.rectangle("fill", panelX, panelY, panelW, panelH)
+  setColorScaled(palette.panelEdge, 1, 1)
+  love.graphics.rectangle("line", panelX, panelY, panelW, panelH)
+  love.graphics.setScissor(panelX + 1, panelY + 1, panelW - 2, panelH - 2)
+
+  love.graphics.setColor(palette.text)
+  drawText("ORBIT POINTS  " .. tostring(state.orbits), panelX + padX, y)
+  y = y + lineH + 6
+  setColorScaled(palette.panelEdge, 1, 0.65)
+  love.graphics.line(panelX + padX, y, panelX + panelW - padX, y)
+  y = y + 6
+
+  drawHeader("GENERATORS")
+  drawRow(ui.buyMoonBtn, "MOON", moonCostText, canBuyMoon)
+  drawRow(ui.buySatelliteBtn, "SATELLITE", satelliteStatus, canBuySatellite)
+
+  drawHeader("UPGRADES")
+  drawRow(ui.speedWaveBtn, "SPEED WAVE", waveStatus, speedWaveReady)
+  drawRow(ui.speedClickBtn, "SPEED CLICK", clickStatus, speedClickReady)
+
+  local descAlpha = state.speedClickUnlocked and 1 or 0.58
+  setColorScaled(palette.text, 1, descAlpha)
+  drawText("PLANET CLICKS ACCELERATE A RANDOM ORBITER", panelX + padX, y)
+  love.graphics.setScissor()
 
   love.graphics.setColor(palette.muted)
   local helpY1 = GAME_H - lineH * 2 - 8
@@ -1046,6 +1095,11 @@ function love.mousepressed(x, y, button)
 
   if gx >= ui.speedWaveBtn.x and gx <= ui.speedWaveBtn.x + ui.speedWaveBtn.w and gy >= ui.speedWaveBtn.y and gy <= ui.speedWaveBtn.y + ui.speedWaveBtn.h then
     buySpeedWave()
+    return
+  end
+
+  if gx >= ui.speedClickBtn.x and gx <= ui.speedClickBtn.x + ui.speedClickBtn.w and gy >= ui.speedClickBtn.y and gy <= ui.speedClickBtn.y + ui.speedClickBtn.h then
+    buySpeedClick()
     return
   end
 
