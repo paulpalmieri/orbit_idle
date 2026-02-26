@@ -38,36 +38,62 @@ local BODY_VISUAL = {
   satelliteRadius = 4,
   moonChildSatelliteRadius = 1.8,
 }
+local PLANET_IMPULSE_MULTIPLIER = 2
+local PLANET_IMPULSE_TARGET_BOOST = PLANET_IMPULSE_MULTIPLIER - 1
+local PLANET_IMPULSE_DURATION = 10
+local PLANET_IMPULSE_RISE_RATE = 4.5
+local PLANET_IMPULSE_FALL_RATE = 6.5
 
 local canvas
 local scale = 1
 local offsetX = 0
 local offsetY = 0
+local zoom = 1
 
 local cx = math.floor(GAME_W / 2)
 local cy = math.floor(GAME_H / 2)
 
+local swatch = {
+  coral = {1.0000, 0.5098, 0.4549, 1},    -- #ff8274
+  rose = {0.8353, 0.2353, 0.4157, 1},     -- #d53c6a
+  mulberry = {0.4863, 0.0941, 0.2353, 1}, -- #7c183c
+  plum = {0.2745, 0.0549, 0.1686, 1},     -- #460e2b
+  burgundy = {0.1922, 0.0196, 0.1176, 1}, -- #31051e
+  maroon = {0.1216, 0.0196, 0.0627, 1},   -- #1f0510
+  obsidian = {0.0745, 0.0078, 0.0314, 1}, -- #130208
+}
+
 local palette = {
-  space = {0.04, 0.06, 0.12, 1},
-  nebulaA = {0.11, 0.15, 0.24, 1},
-  nebulaB = {0.16, 0.21, 0.34, 1},
-  starA = {0.23, 0.32, 0.48, 1},
-  starB = {0.45, 0.57, 0.78, 1},
-  orbit = {0.20, 0.25, 0.40, 1},
-  panel = {0.12, 0.16, 0.24, 1},
-  panelEdge = {0.28, 0.35, 0.50, 1},
-  text = {0.90, 0.93, 0.99, 1},
-  muted = {0.63, 0.68, 0.79, 1},
-  accent = {1.0, 0.82, 0.35, 1},
-  planetDark = {0.13, 0.31, 0.42, 1},
-  planetMid = {0.25, 0.50, 0.66, 1},
-  planetLight = {0.47, 0.82, 1.0, 1},
-  moonFront = {1.0, 0.88, 0.48, 1},
-  moonBack = {0.58, 0.52, 0.33, 1},
-  satelliteFront = {0.72, 0.91, 1.0, 1},
-  satelliteBack = {0.43, 0.58, 0.68, 1},
-  trail = {1.0, 0.80, 0.42, 0.35},
-  satelliteTrail = {0.62, 0.88, 1.0, 0.35},
+  space = swatch.obsidian,
+  nebulaA = swatch.maroon,
+  nebulaB = swatch.burgundy,
+  starA = swatch.mulberry,
+  starB = swatch.coral,
+  orbit = swatch.plum,
+  panel = swatch.maroon,
+  panelEdge = swatch.rose,
+  text = swatch.coral,
+  muted = swatch.rose,
+  accent = swatch.rose,
+  planetCore = swatch.mulberry,
+  planetDark = swatch.burgundy,
+  planetMid = swatch.plum,
+  planetLight = swatch.coral,
+  moonFront = swatch.coral,
+  moonBack = swatch.mulberry,
+  satelliteFront = swatch.coral,
+  satelliteBack = swatch.plum,
+  trail = {swatch.rose[1], swatch.rose[2], swatch.rose[3], 0.35},
+  satelliteTrail = {swatch.mulberry[1], swatch.mulberry[2], swatch.mulberry[3], 0.35},
+}
+local paletteSwatches = {
+  swatch.coral,
+  swatch.rose,
+  swatch.mulberry,
+  swatch.plum,
+  swatch.burgundy,
+  swatch.maroon,
+  swatch.obsidian,
 }
 
 local state = {
@@ -116,13 +142,34 @@ local function depthLight(z, ambient, intensity, x, y)
   return clamp(ambient + progressiveBlend * intensity * pointBlend, 0, 1.25)
 end
 
+local function nearestPaletteSwatch(r, g, b)
+  local best = paletteSwatches[1]
+  local bestDist = math.huge
+  for i = 1, #paletteSwatches do
+    local p = paletteSwatches[i]
+    local dr = r - p[1]
+    local dg = g - p[2]
+    local db = b - p[3]
+    local dist = dr * dr + dg * dg + db * db
+    if dist < bestDist then
+      bestDist = dist
+      best = p
+    end
+  end
+  return best
+end
+
 local function setColorScaled(color, lightScale, alphaScale)
   local light = lightScale or 1
   local alpha = alphaScale or 1
+  local sr = clamp(color[1] * light, 0, 1)
+  local sg = clamp(color[2] * light, 0, 1)
+  local sb = clamp(color[3] * light, 0, 1)
+  local sw = nearestPaletteSwatch(sr, sg, sb)
   love.graphics.setColor(
-    clamp(color[1] * light, 0, 1),
-    clamp(color[2] * light, 0, 1),
-    clamp(color[3] * light, 0, 1),
+    sw[1],
+    sw[2],
+    sw[3],
     clamp((color[4] or 1) * alpha, 0, 1)
   )
 end
@@ -135,12 +182,24 @@ local function setColorBlendScaled(colorA, colorB, blend, lightScale, alphaScale
   local g = lerp(colorA[2], colorB[2], t)
   local b = lerp(colorA[3], colorB[3], t)
   local a = lerp(colorA[4] or 1, colorB[4] or 1, t)
+  local sr = clamp(r * light, 0, 1)
+  local sg = clamp(g * light, 0, 1)
+  local sb = clamp(b * light, 0, 1)
+  local sw = nearestPaletteSwatch(sr, sg, sb)
   love.graphics.setColor(
-    clamp(r * light, 0, 1),
-    clamp(g * light, 0, 1),
-    clamp(b * light, 0, 1),
+    sw[1],
+    sw[2],
+    sw[3],
     clamp(a * alpha, 0, 1)
   )
+end
+
+local function setOrbiterShadedColor(backColor, sideBlend, light, alphaScale)
+  local faceBlend = clamp(sideBlend or 0, 0, 1)
+  local lightBlend = smoothstep(clamp(light or 0, 0, 1))
+  local blend = clamp(faceBlend * 0.68 + lightBlend * 0.32, 0, 1)
+  -- Orbiters always peak at the brightest swatch color.
+  setColorBlendScaled(backColor, palette.planetLight, blend, 1, alphaScale or 1)
 end
 
 local function moonCost()
@@ -201,6 +260,11 @@ local function toGameSpace(mx, my)
   return (mx - offsetX) / scale, (my - offsetY) / scale
 end
 
+local function toWorldSpace(mx, my)
+  local gx, gy = toGameSpace(mx, my)
+  return (gx - cx) / zoom + cx, (gy - cy) / zoom + cy
+end
+
 local updateOrbiterPosition
 
 local function addMoon()
@@ -221,6 +285,7 @@ local function addMoon()
     plane = orbital.plane,
     speed = orbital.speed,
     boost = 0,
+    boostDurations = {},
     x = cx,
     y = cy,
     z = 0,
@@ -251,6 +316,7 @@ local function addSatellite()
     plane = orbital.plane,
     speed = orbital.speed,
     boost = 0,
+    boostDurations = {},
     x = cx,
     y = cy,
     z = 0,
@@ -289,6 +355,7 @@ local function addSatelliteToMoon(moon)
     plane = orbital.plane,
     speed = orbital.speed,
     boost = 0,
+    boostDurations = {},
     x = moon.x,
     y = moon.y,
     z = 0,
@@ -308,6 +375,54 @@ updateOrbiterPosition = function(orbiter)
   orbiter.x = cx + ox * cp - oy * sp
   orbiter.y = cy + ox * sp + oy * cp
   orbiter.z = math.sin(orbiter.angle) * (orbiter.depthScale or 1)
+end
+
+local function updateOrbiterBoost(orbiter, dt)
+  local durations = orbiter.boostDurations or {}
+  for i = #durations, 1, -1 do
+    durations[i] = durations[i] - dt
+    if durations[i] <= 0 then
+      table.remove(durations, i)
+    end
+  end
+  orbiter.boostDurations = durations
+
+  local activeStacks = #durations
+  local targetBoost = activeStacks * PLANET_IMPULSE_TARGET_BOOST
+  local blendRate = activeStacks > 0 and PLANET_IMPULSE_RISE_RATE or PLANET_IMPULSE_FALL_RATE
+  local blend = math.min(1, dt * blendRate)
+  orbiter.boost = orbiter.boost + (targetBoost - orbiter.boost) * blend
+
+  if activeStacks == 0 and orbiter.boost < 0.001 then
+    orbiter.boost = 0
+  end
+end
+
+local function pickPlanetImpulseTarget()
+  local pool = {}
+  for _, moon in ipairs(state.moons) do
+    table.insert(pool, moon)
+  end
+  for _, satellite in ipairs(state.satellites) do
+    table.insert(pool, satellite)
+  end
+
+  if #pool == 0 then
+    return nil
+  end
+
+  return pool[love.math.random(1, #pool)]
+end
+
+local function triggerPlanetImpulse()
+  local target = pickPlanetImpulseTarget()
+  if not target then
+    return false
+  end
+
+  target.boostDurations = target.boostDurations or {}
+  table.insert(target.boostDurations, PLANET_IMPULSE_DURATION)
+  return true
 end
 
 local function drawCircle(x, y, r, color, lightScale, alphaScale)
@@ -354,7 +469,7 @@ local function drawSelectedOrbit(frontPass)
         local my = (py + y) * 0.5
         local segLight = depthLight(segZ, 0.10, 1.10, mx, my)
         local segAlpha = 0.12 + segLight * 0.60
-        love.graphics.setColor(1, 1, 1, segAlpha)
+        setColorScaled(palette.text, 1, segAlpha)
         love.graphics.line(math.floor(px + 0.5), math.floor(py + 0.5), math.floor(x + 0.5), math.floor(y + 0.5))
       end
     end
@@ -363,24 +478,40 @@ local function drawSelectedOrbit(frontPass)
 end
 
 local function drawPlanet()
-  drawCircle(cx, cy, BODY_VISUAL.planetRadius, palette.planetMid)
+  setColorScaled(palette.planetCore, 1, 1)
+  love.graphics.circle("fill", cx, cy, BODY_VISUAL.planetRadius, 36)
+end
+
+local function drawOrbitalTrail(orbiter, trailLen, color, headAlpha, tailAlpha)
+  local radius = math.max(orbiter.radius, 1)
+  local arcAngle = trailLen / radius
+  local stepCount = math.max(4, math.ceil(arcAngle / 0.06))
+  local stepAngle = arcAngle / stepCount
+  local cp = math.cos(orbiter.plane)
+  local sp = math.sin(orbiter.plane)
+  local prevX, prevY
+
+  for i = 0, stepCount do
+    local a = orbiter.angle - stepAngle * i
+    local ox = math.cos(a) * orbiter.radius
+    local oy = math.sin(a) * orbiter.radius * orbiter.flatten
+    local x = cx + ox * cp - oy * sp
+    local y = cy + ox * sp + oy * cp
+    if prevX then
+      local t = i / stepCount
+      local alpha = lerp(headAlpha or 0.35, tailAlpha or 0.02, t)
+      setColorScaled(color, 1, alpha)
+      love.graphics.line(prevX, prevY, x, y)
+    end
+    prevX, prevY = x, y
+  end
 end
 
 local function drawMoon(moon)
-  local light = depthLight(moon.z, 0.42, 0.68, moon.x, moon.y)
-  local sideBlend = smoothstep((moon.z + 1) * 0.5)
-  local trailX = moon.x - math.cos(moon.angle) * (3.0 + moon.boost * 2.4)
-  local trailY = moon.y - math.sin(moon.angle) * (3.0 + moon.boost * 2.4)
-  setColorScaled(palette.trail, 0.60 + light * 0.42, 0.45 + light * 0.45)
-  love.graphics.line(trailX, trailY, moon.x, moon.y)
-
-  setColorBlendScaled(palette.moonBack, palette.moonFront, sideBlend, light)
+  local baseTrailLen = math.min(moon.radius * 2.2, 20 + moon.boost * 28)
+  drawOrbitalTrail(moon, baseTrailLen, palette.moonFront, 0.48, 0.03)
+  setColorScaled(palette.moonFront, 1, 1)
   love.graphics.circle("fill", moon.x, moon.y, BODY_VISUAL.moonRadius, 18)
-
-  if moon.boost > 0.05 then
-    setColorScaled(palette.accent, 0.70 + light * 0.48, 0.60 + light * 0.30)
-    love.graphics.arc("fill", "open", moon.x, moon.y, BODY_VISUAL.moonRadius + 2 + moon.boost * 2, moon.angle - 0.35, moon.angle + 0.35, 10)
-  end
 
   local childSatellites = moon.childSatellites or {}
   if #childSatellites > 0 then
@@ -393,27 +524,17 @@ local function drawMoon(moon)
       local sy = moon.y + ox * sp + oy * cp
       local sz = math.sin(child.angle) * (child.depthScale or 1)
       local childLight = depthLight(sz, 0.35, 0.88, sx, sy)
-      setColorBlendScaled(palette.satelliteBack, palette.satelliteFront, smoothstep((sz + 1) * 0.5), childLight, 0.88)
+      setOrbiterShadedColor(palette.satelliteBack, smoothstep((sz + 1) * 0.5), childLight, 0.88)
       love.graphics.circle("fill", sx, sy, BODY_VISUAL.moonChildSatelliteRadius, 12)
     end
   end
 end
 
 local function drawSatellite(satellite)
-  local light = depthLight(satellite.z, 0.40, 0.72, satellite.x, satellite.y)
-  local sideBlend = smoothstep((satellite.z + 1) * 0.5)
-  local trailX = satellite.x - math.cos(satellite.angle) * (2.5 + satellite.boost * 2.0)
-  local trailY = satellite.y - math.sin(satellite.angle) * (2.5 + satellite.boost * 2.0)
-  setColorScaled(palette.satelliteTrail, 0.62 + light * 0.46, 0.43 + light * 0.50)
-  love.graphics.line(trailX, trailY, satellite.x, satellite.y)
-
-  setColorBlendScaled(palette.satelliteBack, palette.satelliteFront, sideBlend, light)
+  local baseTrailLen = math.min(satellite.radius * 2.2, 16 + satellite.boost * 22)
+  drawOrbitalTrail(satellite, baseTrailLen, palette.satelliteFront, 0.44, 0.02)
+  setColorScaled(palette.satelliteFront, 1, 1)
   love.graphics.circle("fill", satellite.x, satellite.y, BODY_VISUAL.satelliteRadius, 18)
-
-  if satellite.boost > 0.05 then
-    setColorBlendScaled(palette.satelliteBack, palette.satelliteFront, sideBlend, 0.75 + light * 0.42, 0.62 + light * 0.28)
-    love.graphics.arc("line", "open", satellite.x, satellite.y, BODY_VISUAL.satelliteRadius + 1.5 + satellite.boost * 1.5, satellite.angle - 0.35, satellite.angle + 0.35, 10)
-  end
 end
 
 local function drawHud()
@@ -425,22 +546,27 @@ local function drawHud()
   local moonBuyCost = moonCost()
   local canBuyMoon = state.orbits >= moonBuyCost
   local moonAlpha = canBuyMoon and 1 or 0.45
-  love.graphics.setColor(1.0, 0.88, 0.48, moonAlpha)
+  setColorScaled(palette.moonFront, 1, moonAlpha)
   love.graphics.circle("fill", ui.buyMoonBtn.x + 4, ui.buyMoonBtn.y + 6, 2, 12)
-  love.graphics.setColor(1, 1, 1, moonAlpha)
+  setColorScaled(palette.text, 1, moonAlpha)
   local moonCostText = moonBuyCost == 0 and "FREE" or tostring(moonBuyCost)
   love.graphics.print("MOON " .. moonCostText, ui.buyMoonBtn.x + 10, ui.buyMoonBtn.y + 1)
 
   local canBuySatellite = #state.moons >= 1
   local satAlpha = canBuySatellite and 1 or 0.45
-  love.graphics.setColor(0.72, 0.91, 1.0, satAlpha)
+  setColorScaled(palette.satelliteFront, 1, satAlpha)
   love.graphics.circle("fill", ui.buySatelliteBtn.x + 4, ui.buySatelliteBtn.y + 6, 1.8, 12)
-  love.graphics.setColor(0.72, 0.91, 1.0, satAlpha * 0.60)
+  setColorScaled(palette.satelliteFront, 1, satAlpha * 0.60)
   love.graphics.circle("line", ui.buySatelliteBtn.x + 4, ui.buySatelliteBtn.y + 6, 3.1, 12)
-  love.graphics.setColor(1, 1, 1, satAlpha)
+  setColorScaled(palette.text, 1, satAlpha)
   love.graphics.print("SAT 1 MOON", ui.buySatelliteBtn.x + 10, ui.buySatelliteBtn.y + 1)
 
   love.graphics.setColor(palette.muted)
+  if zoom > 1.005 then
+    love.graphics.print(string.format("ZOOM %.1fx  SCROLL TO ZOOM", zoom), 8, GAME_H - 22)
+  else
+    love.graphics.print("SCROLL TO ZOOM", 8, GAME_H - 22)
+  end
   love.graphics.print("B FULLSCREEN", 8, GAME_H - 12)
 end
 
@@ -466,13 +592,16 @@ local function drawOrbiterTooltip()
   local anchorX = boxX
   local anchorY = boxY + math.floor(boxH * 0.5)
 
-  love.graphics.setColor(1, 1, 1, 0.55 * fade)
-  love.graphics.line(anchorX, anchorY, orbiter.x, orbiter.y)
-  love.graphics.circle("fill", orbiter.x, orbiter.y, 1.2, 8)
+  local zoomedX = (orbiter.x - cx) * zoom + cx
+  local zoomedY = (orbiter.y - cy) * zoom + cy
 
-  love.graphics.setColor(0.07, 0.09, 0.16, 0.60 * fade)
+  setColorScaled(palette.text, 1, 0.55 * fade)
+  love.graphics.line(anchorX, anchorY, zoomedX, zoomedY)
+  love.graphics.circle("fill", zoomedX, zoomedY, 1.2, 8)
+
+  setColorScaled(palette.panel, 1, 0.60 * fade)
   love.graphics.rectangle("fill", boxX, boxY, boxW, boxH)
-  love.graphics.setColor(1, 1, 1, fade)
+  setColorScaled(palette.text, 1, fade)
   love.graphics.print(line1, boxX + padX, boxY + 3)
   love.graphics.print(line2, boxX + padX, boxY + 11)
 
@@ -491,18 +620,18 @@ local function drawOrbiterTooltip()
     ui.moonAddSatelliteBtn.visible = true
     ui.moonAddSatelliteBtn.enabled = canAddSatellite
 
-    love.graphics.setColor(0.07, 0.09, 0.16, 0.60 * btnAlpha)
+    setColorScaled(palette.panel, 1, 0.60 * btnAlpha)
     love.graphics.rectangle("fill", btnX, btnY, btnW, btnH)
-    love.graphics.setColor(0.72, 0.91, 1.0, 0.60 * btnAlpha)
+    setColorScaled(palette.panelEdge, 1, 0.60 * btnAlpha)
     love.graphics.rectangle("line", btnX, btnY, btnW, btnH)
-    love.graphics.setColor(1, 1, 1, btnAlpha)
+    setColorScaled(palette.text, 1, btnAlpha)
     love.graphics.print("ADD SAT -3 S", btnX + 6, btnY + 2)
   end
 end
 
 function love.load()
   love.graphics.setDefaultFilter("nearest", "nearest")
-  love.graphics.setFont(love.graphics.newFont(10))
+  love.graphics.setFont(love.graphics.newFont("m5x7.ttf", 16))
   love.graphics.setLineStyle("rough")
   love.graphics.setLineJoin("none")
   setBorderlessFullscreen(false)
@@ -533,16 +662,20 @@ function love.keypressed(key)
   end
 end
 
+function love.wheelmoved(_, wy)
+  zoom = clamp(zoom + wy * 0.1, 1, 2)
+end
+
 function love.update(dt)
   dt = math.min(dt, 0.05)
   state.time = state.time + dt
 
   for _, moon in ipairs(state.moons) do
     local prev = moon.angle
+    updateOrbiterBoost(moon, dt)
     local effectiveSpeed = moon.speed * (1 + moon.boost)
 
     moon.angle = moon.angle + effectiveSpeed * dt
-    moon.boost = clamp(moon.boost - 0.45 * dt, 0, 1.2)
 
     local prevTurns = math.floor(prev / (math.pi * 2))
     local newTurns = math.floor(moon.angle / (math.pi * 2))
@@ -573,10 +706,10 @@ function love.update(dt)
 
   for _, satellite in ipairs(state.satellites) do
     local prev = satellite.angle
+    updateOrbiterBoost(satellite, dt)
     local effectiveSpeed = satellite.speed * (1 + satellite.boost)
 
     satellite.angle = satellite.angle + effectiveSpeed * dt
-    satellite.boost = clamp(satellite.boost - 0.55 * dt, 0, 1.2)
 
     local prevTurns = math.floor(prev / (math.pi * 2))
     local newTurns = math.floor(satellite.angle / (math.pi * 2))
@@ -621,10 +754,19 @@ function love.mousepressed(x, y, button)
     return
   end
 
+  local wx, wy = toWorldSpace(x, y)
+  local planetDx = wx - cx
+  local planetDy = wy - cy
+  local planetHitR = BODY_VISUAL.planetRadius
+  if planetDx * planetDx + planetDy * planetDy <= planetHitR * planetHitR then
+    triggerPlanetImpulse()
+    return
+  end
+
   for i = #state.moons, 1, -1 do
     local moon = state.moons[i]
-    local dx = gx - moon.x
-    local dy = gy - moon.y
+    local dx = wx - moon.x
+    local dy = wy - moon.y
     local moonHitR = BODY_VISUAL.moonRadius + 2
     if dx * dx + dy * dy <= moonHitR * moonHitR then
       state.selectedOrbiter = moon
@@ -634,19 +776,27 @@ function love.mousepressed(x, y, button)
 
   for i = #state.satellites, 1, -1 do
     local satellite = state.satellites[i]
-    local dx = gx - satellite.x
-    local dy = gy - satellite.y
+    local dx = wx - satellite.x
+    local dy = wy - satellite.y
     local satelliteHitR = BODY_VISUAL.satelliteRadius + 1.5
     if dx * dx + dy * dy <= satelliteHitR * satelliteHitR then
       state.selectedOrbiter = satellite
       return
     end
   end
+
+  state.selectedOrbiter = nil
 end
 
 function love.draw()
   love.graphics.setCanvas(canvas)
   drawBackground()
+
+  love.graphics.push()
+  love.graphics.translate(cx, cy)
+  love.graphics.scale(zoom, zoom)
+  love.graphics.translate(-cx, -cy)
+
   drawSelectedOrbit(false)
 
   local back = {}
@@ -690,11 +840,13 @@ function love.draw()
     drawMoon(m)
   end
 
+  love.graphics.pop()
+
   drawOrbiterTooltip()
   drawHud()
 
   love.graphics.setCanvas()
-  love.graphics.clear(0.06, 0.08, 0.12, 1)
+  love.graphics.clear(palette.space)
 
   love.graphics.draw(canvas, offsetX, offsetY, 0, scale, scale)
 end
