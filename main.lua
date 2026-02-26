@@ -79,6 +79,7 @@ local CLICK_FX_PITCH_OPEN = 1.0
 local CLICK_FX_PITCH_CLOSE = 0.88
 local CLICK_FX_MENU_PITCH_MIN = 0.92
 local CLICK_FX_MENU_PITCH_MAX = 1.08
+local SELECTED_ORBIT_COLOR = {1.0000, 0.5098, 0.4549, 1}
 
 local canvas
 local uiFont
@@ -122,7 +123,7 @@ local palette = {
   panelEdge = swatch.brightest,
   text = swatch.brightest,
   muted = swatch.brightest,
-  accent = swatch.brightest,
+  accent = swatch.mid,
   planetCore = swatch.mid,
   planetDark = swatch.dimmest,
   planetMid = swatch.dim,
@@ -788,7 +789,6 @@ local function drawSelectedOrbit(frontPass)
     return
   end
   local function drawOrbitPath(target, originX, originY, zOffset)
-    local pr, pg, pb = computeOrbiterColor(target.angle)
     local cp = math.cos(target.plane)
     local sp = math.sin(target.plane)
     local px, py, pz
@@ -801,7 +801,7 @@ local function drawSelectedOrbit(frontPass)
       if px then
         local segZ = (pz + z) * 0.5
         if (frontPass and segZ > 0) or ((not frontPass) and segZ <= 0) then
-          setColorDirect(pr, pg, pb, 0.72)
+          setColorDirect(SELECTED_ORBIT_COLOR[1], SELECTED_ORBIT_COLOR[2], SELECTED_ORBIT_COLOR[3], 0.84)
           love.graphics.line(math.floor(px + 0.5), math.floor(py + 0.5), math.floor(x + 0.5), math.floor(y + 0.5))
         end
       end
@@ -982,7 +982,7 @@ local function drawHud()
 
   local panelX = math.floor(offsetX + 12 * uiScale)
   local panelY = math.floor(offsetY + 12 * uiScale)
-  local panelW = math.floor(350 * uiScale)
+  local panelW = math.floor(292 * uiScale)
   local padX = math.floor(8 * uiScale)
   local rowH = lineH + math.floor(5 * uiScale)
   local gap = math.floor(2 * uiScale)
@@ -1003,11 +1003,10 @@ local function drawHud()
     local alpha = enabled and 1 or 0.40
     local hovered = pointInRect(mouseX, mouseY, btn)
     if hovered then
-      setColorScaled(swatch.brightest, 1, 0.95)
-      love.graphics.rectangle("fill", btn.x, btn.y, btn.w, btn.h)
+      setColorScaled(swatch.brightest, 1, 0.95 * alpha)
+      love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h)
     end
-    local textColor = hovered and palette.space or palette.text
-    setColorScaled(textColor, 1, alpha)
+    setColorScaled(palette.text, 1, alpha)
     drawText(label, btn.x + math.floor(8 * uiScale), btn.y + rowTextInsetY)
     if status and status ~= "" then
       if orbitCost then
@@ -1107,21 +1106,19 @@ local function drawHud()
     end
     tipX = clamp(tipX, offsetX + 4, viewportRight - tipW - 4)
 
-    setColorScaled(palette.space, 1, 0.92)
-    love.graphics.rectangle("fill", tipX + 2, tipY + 2, tipW, tipH)
     setColorScaled(swatch.brightest, 1, 0.96)
-    love.graphics.rectangle("fill", tipX, tipY, tipW, tipH)
+    love.graphics.rectangle("line", tipX, tipY, tipW, tipH)
     for i = 1, #hoveredUpgradeLines do
       local line = hoveredUpgradeLines[i]
       local lineY = tipY + tipPadY + (i - 1) * (tipLineH + tipGap)
       local lineX = tipX + tipPadX
-      setColorScaled(palette.space, 1, 0.85)
+      setColorScaled(palette.text, 1, 0.85)
       drawText(line.pre or "", lineX, lineY)
       lineX = lineX + font:getWidth(line.pre or "")
-      setColorScaled(swatch.bright, 1, 1)
+      setColorScaled(palette.accent, 1, 1)
       drawText(line.hi or "", lineX, lineY)
       lineX = lineX + font:getWidth(line.hi or "")
-      setColorScaled(palette.space, 1, 0.85)
+      setColorScaled(palette.text, 1, 0.85)
       drawText(line.post or "", lineX, lineY)
     end
   end
@@ -1145,18 +1142,41 @@ local function getOrbiterTooltipLayout()
     return nil
   end
 
-  local pr, pg, pb = computeOrbiterColor(orbiter.angle)
-  local rpm = (orbiter.speed * (1 + orbiter.boost)) * (60 / (math.pi * 2))
-  local title = orbiter.kind == "satellite" and "satellite" or "moon"
-  local line1 = string.format("%s  rev %d", title, orbiter.revolutions)
-  local line2 = string.format("rpm %.2f", rpm)
   local font = getUiScreenFont()
   local uiScale = scale >= 1 and scale or 1
-  local textW = math.max(font:getWidth(line1), font:getWidth(line2))
+  local baseRpm = orbiter.speed * (60 / (math.pi * 2))
+  local totalBoost = orbiter.boost + speedWaveBoostFor(orbiter)
+  local currentRpm = orbiter.speed * (1 + totalBoost) * (60 / (math.pi * 2))
+  local boostPercent = math.floor(totalBoost * 100 + 0.5)
+  local title = orbiter.kind == "satellite" and "selected satellite" or "selected moon"
+  local detailLines = {
+    {pre = "revolutions ", hi = tostring(orbiter.revolutions), post = ""},
+    {pre = "orbit radius ", hi = string.format("%.0f px", orbiter.radius), post = ""},
+    {pre = "base speed ", hi = string.format("%.2f rpm", baseRpm), post = ""},
+    {pre = "current speed ", hi = string.format("%.2f rpm", currentRpm), post = ""},
+    {pre = "active boost ", hi = string.format("%+d%%", boostPercent), post = ""},
+  }
+  if orbiter.kind == "moon" then
+    detailLines[#detailLines + 1] = {
+      pre = "moon satellites ",
+      hi = tostring(#(orbiter.childSatellites or {})),
+      post = "",
+    }
+  end
+
+  local textW = font:getWidth(title)
+  for i = 1, #detailLines do
+    local line = detailLines[i]
+    local lineW = font:getWidth(line.pre or "") + font:getWidth(line.hi or "") + font:getWidth(line.post or "")
+    textW = math.max(textW, lineW)
+  end
   local lineH = math.floor(font:getHeight())
-  local padX = math.floor(6 * uiScale)
+  local padX = math.floor(8 * uiScale)
+  local padY = math.floor(6 * uiScale)
+  local lineGap = math.floor(2 * uiScale)
+  local titleGap = math.floor(2 * uiScale)
   local boxW = textW + padX * 2
-  local boxH = lineH * 2 + math.floor(8 * uiScale)
+  local boxH = padY * 2 + lineH + titleGap + #detailLines * lineH + lineGap * math.max(0, #detailLines - 1)
   local boxX = math.floor(offsetX + GAME_W * scale - boxW - 8 * uiScale)
   local boxY = math.floor(offsetY + 8 * uiScale)
   local anchorX = boxX
@@ -1165,12 +1185,14 @@ local function getOrbiterTooltipLayout()
 
   return {
     orbiter = orbiter,
-    color = {pr, pg, pb},
-    line1 = line1,
-    line2 = line2,
+    title = title,
+    detailLines = detailLines,
     lineH = lineH,
+    lineGap = lineGap,
+    titleGap = titleGap,
     uiScale = uiScale,
     padX = padX,
+    padY = padY,
     boxX = boxX,
     boxY = boxY,
     boxW = boxW,
@@ -1192,11 +1214,8 @@ local function drawOrbiterTooltipConnector(frontPass)
   if (frontPass and orbiter.z <= 0) or ((not frontPass) and orbiter.z > 0) then
     return
   end
-  local pr = layout.color[1]
-  local pg = layout.color[2]
-  local pb = layout.color[3]
 
-  setColorDirect(pr, pg, pb, 0.82)
+  setColorDirect(SELECTED_ORBIT_COLOR[1], SELECTED_ORBIT_COLOR[2], SELECTED_ORBIT_COLOR[3], 0.88)
   love.graphics.line(layout.anchorWorldX, layout.anchorWorldY, orbiter.x, orbiter.y)
 end
 
@@ -1208,15 +1227,29 @@ local function drawOrbiterTooltip()
     return
   end
   local orbiter = layout.orbiter
-  local pr = layout.color[1]
-  local pg = layout.color[2]
-  local pb = layout.color[3]
 
-  setColorDirect(pr, pg, pb, 0.24)
-  love.graphics.rectangle("fill", layout.boxX, layout.boxY, layout.boxW, layout.boxH)
-  setColorDirect(pr, pg, pb, 1)
-  drawText(layout.line1, layout.boxX + layout.padX, layout.boxY + 4)
-  drawText(layout.line2, layout.boxX + layout.padX, layout.boxY + 4 + layout.lineH)
+  setColorScaled(swatch.brightest, 1, 0.96)
+  love.graphics.rectangle("line", layout.boxX, layout.boxY, layout.boxW, layout.boxH)
+
+  local textX = layout.boxX + layout.padX
+  local y = layout.boxY + layout.padY
+  local font = love.graphics.getFont()
+  setColorScaled(palette.text, 1, 0.96)
+  drawText(layout.title, textX, y)
+  y = y + layout.lineH + layout.titleGap
+  for i = 1, #layout.detailLines do
+    local line = layout.detailLines[i]
+    local lineX = textX
+    setColorScaled(palette.text, 1, 0.85)
+    drawText(line.pre or "", lineX, y)
+    lineX = lineX + font:getWidth(line.pre or "")
+    setColorScaled(palette.accent, 1, 1)
+    drawText(line.hi or "", lineX, y)
+    lineX = lineX + font:getWidth(line.hi or "")
+    setColorScaled(palette.text, 1, 0.85)
+    drawText(line.post or "", lineX, y)
+    y = y + layout.lineH + layout.lineGap
+  end
 
   if orbiter.kind == "moon" then
     local btnW = math.max(layout.boxW, 76)
@@ -1233,12 +1266,10 @@ local function drawOrbiterTooltip()
     ui.moonAddSatelliteBtn.visible = true
     ui.moonAddSatelliteBtn.enabled = canAddSatellite
 
-    setColorDirect(pr, pg, pb, 0.24 * btnAlpha)
-    love.graphics.rectangle("fill", btnX, btnY, btnW, btnH)
-    setColorDirect(pr, pg, pb, 0.72 * btnAlpha)
+    setColorScaled(swatch.brightest, 1, 0.96 * btnAlpha)
     love.graphics.rectangle("line", btnX, btnY, btnW, btnH)
-    setColorDirect(pr, pg, pb, btnAlpha)
-    drawText("add sat -" .. tostring(moonSatelliteCost()) .. " o", btnX + math.floor(6 * layout.uiScale), btnY + math.floor(3 * layout.uiScale))
+    setColorScaled(palette.text, 1, btnAlpha)
+    drawText("add satellite  -" .. tostring(moonSatelliteCost()) .. " orbits", btnX + math.floor(6 * layout.uiScale), btnY + math.floor(3 * layout.uiScale))
   end
 end
 
