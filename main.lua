@@ -1034,21 +1034,50 @@ local function drawHud()
   local rowCount = 4
   local panelH = math.floor(6 * uiScale) + sectionCount * (lineH + math.floor(2 * uiScale)) + rowCount * (rowH + gap) + math.floor(4 * uiScale)
 
+  local hoveredTooltipLines
+  local hoveredTooltipBtn
+
   love.graphics.setScissor(panelX + 1, panelY + 1, panelW - 2, panelH - 2)
 
   drawHeader("generators")
-  drawRow(ui.buyMoonBtn, "moon", tostring(moonBuyCost), canBuyMoon, true)
-  drawRow(ui.buySatelliteBtn, "satellite", satelliteStatus, canBuySatellite)
+  local moonHovered = drawRow(ui.buyMoonBtn, "moon", tostring(moonBuyCost), canBuyMoon, true)
+  if moonHovered then
+    hoveredTooltipBtn = ui.buyMoonBtn
+    hoveredTooltipLines = {
+      {
+        pre = "Adds a moon orbiting the planet.",
+        hi = "",
+        post = "",
+      },
+      {
+        pre = "Moons can host ",
+        hi = "moon satellites",
+        post = ".",
+      },
+    }
+  end
+  local satelliteHovered = drawRow(ui.buySatelliteBtn, "satellite", satelliteStatus, canBuySatellite)
+  if satelliteHovered then
+    hoveredTooltipBtn = ui.buySatelliteBtn
+    hoveredTooltipLines = {
+      {
+        pre = "Adds a satellite orbiting the planet.",
+        hi = "",
+        post = "",
+      },
+      {
+        pre = "Satellites generate ",
+        hi = "orbits",
+        post = " when clicked.",
+      },
+    }
+  end
 
   drawHeader("upgrades")
-  local hoveredUpgradeTitle
-  local hoveredUpgradeLines
-  local hoveredUpgradeBtn
   local waveHovered = drawRow(ui.speedWaveBtn, "speed wave", waveStatus, speedWaveReady, not state.speedWaveUnlocked)
   if waveHovered then
-    hoveredUpgradeTitle = "speed wave"
-    hoveredUpgradeBtn = ui.speedWaveBtn
-    hoveredUpgradeLines = {
+    hoveredTooltipBtn = ui.speedWaveBtn
+    hoveredTooltipLines = {
       {
         pre = "Satellites and moon satellites get ",
         hi = string.format("+%d%% speed for %ds", math.floor((SPEED_WAVE_MULTIPLIER - 1) * 100 + 0.5), SPEED_WAVE_DURATION),
@@ -1063,9 +1092,8 @@ local function drawHud()
   end
   local clickHovered = drawRow(ui.speedClickBtn, "speed click", clickStatus, speedClickReady, not state.speedClickUnlocked)
   if clickHovered then
-    hoveredUpgradeTitle = "speed click"
-    hoveredUpgradeBtn = ui.speedClickBtn
-    hoveredUpgradeLines = {
+    hoveredTooltipBtn = ui.speedClickBtn
+    hoveredTooltipLines = {
       {
         pre = "Planet clicks apply ",
         hi = string.format("+%d%% speed for %ds", math.floor(PLANET_IMPULSE_TARGET_BOOST * 100 + 0.5), PLANET_IMPULSE_DURATION),
@@ -1084,32 +1112,34 @@ local function drawHud()
   drawText("planet clicks accelerate a random orbiter", panelX + padX, y)
   love.graphics.setScissor()
 
-  if hoveredUpgradeTitle and hoveredUpgradeLines and hoveredUpgradeBtn then
+  if hoveredTooltipLines and hoveredTooltipBtn then
     local tipPadX = math.floor(8 * uiScale)
     local tipPadY = math.floor(6 * uiScale)
     local tipGap = math.floor(2 * uiScale)
     local tipLineH = lineH
     local tipW = 0
-    for i = 1, #hoveredUpgradeLines do
-      local line = hoveredUpgradeLines[i]
+    for i = 1, #hoveredTooltipLines do
+      local line = hoveredTooltipLines[i]
       local lineW = font:getWidth(line.pre or "") + font:getWidth(line.hi or "") + font:getWidth(line.post or "")
       tipW = math.max(tipW, lineW)
     end
     tipW = tipW + tipPadX * 2
-    local tipH = tipPadY * 2 + tipLineH * #hoveredUpgradeLines + tipGap * math.max(0, #hoveredUpgradeLines - 1)
-    local tipX = hoveredUpgradeBtn.x + hoveredUpgradeBtn.w + math.floor(10 * uiScale)
-    local tipY = hoveredUpgradeBtn.y
+    local tipH = tipPadY * 2 + tipLineH * #hoveredTooltipLines + tipGap * math.max(0, #hoveredTooltipLines - 1)
+    local tipX = hoveredTooltipBtn.x + hoveredTooltipBtn.w + math.floor(10 * uiScale)
+    local tipY = hoveredTooltipBtn.y
     local viewportRight = offsetX + GAME_W * scale
     local viewportBottom = offsetY + GAME_H * scale
     if tipX + tipW > viewportRight - 4 then
-      tipX = hoveredUpgradeBtn.x - tipW - math.floor(10 * uiScale)
+      tipX = hoveredTooltipBtn.x - tipW - math.floor(10 * uiScale)
     end
     tipX = clamp(tipX, offsetX + 4, viewportRight - tipW - 4)
 
+    setColorScaled(swatch.darkest, 1, 0.96)
+    love.graphics.rectangle("fill", tipX, tipY, tipW, tipH)
     setColorScaled(swatch.brightest, 1, 0.96)
     love.graphics.rectangle("line", tipX, tipY, tipW, tipH)
-    for i = 1, #hoveredUpgradeLines do
-      local line = hoveredUpgradeLines[i]
+    for i = 1, #hoveredTooltipLines do
+      local line = hoveredTooltipLines[i]
       local lineY = tipY + tipPadY + (i - 1) * (tipLineH + tipGap)
       local lineX = tipX + tipPadX
       setColorScaled(palette.text, 1, 0.85)
@@ -1228,6 +1258,8 @@ local function drawOrbiterTooltip()
   end
   local orbiter = layout.orbiter
 
+  setColorScaled(swatch.darkest, 1, 0.96)
+  love.graphics.rectangle("fill", layout.boxX, layout.boxY, layout.boxW, layout.boxH)
   setColorScaled(swatch.brightest, 1, 0.96)
   love.graphics.rectangle("line", layout.boxX, layout.boxY, layout.boxW, layout.boxH)
 
