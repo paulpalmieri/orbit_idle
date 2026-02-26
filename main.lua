@@ -190,6 +190,10 @@ local function lerp(a, b, t)
   return a + (b - a) * t
 end
 
+local function pointInRect(px, py, rect)
+  return px >= rect.x and px <= rect.x + rect.w and py >= rect.y and py <= rect.y + rect.h
+end
+
 local function depthLight(z, ambient, intensity, x, y)
   local t = clamp((z + 1) * 0.5, 0, 1)
   local progressiveBlend = t * 0.55 + smoothstep(t) * 0.45
@@ -953,13 +957,12 @@ local function drawHud()
   local font = love.graphics.getFont()
   local lineH = math.floor(font:getHeight())
   local uiScale = scale >= 1 and scale or 1
+  local mouseX, mouseY = love.mouse.getPosition()
   local counterFont = getOrbitCounterFont()
   local counterText = tostring(state.orbits)
   local counterTextW = counterFont:getWidth(counterText)
   local counterTextH = counterFont:getHeight()
-  local counterIconR = ORBIT_ICON_SIZE * uiScale * 1.65
-  local counterGap = math.floor(18 * uiScale)
-  local counterW = counterTextW + counterGap + counterIconR * 2
+  local counterW = counterTextW
   local counterCenterX = offsetX + (GAME_W * scale) * 0.5
   local counterX = counterCenterX - counterW * 0.5
   local counterY = offsetY + math.floor(8 * uiScale)
@@ -967,13 +970,10 @@ local function drawHud()
   love.graphics.setFont(counterFont)
   love.graphics.setColor(palette.text)
   drawText(counterText, counterX, counterY)
-  local counterIconX = counterX + counterTextW + counterGap + counterIconR
-  local counterIconY = counterY + counterTextH * 0.5
-  drawOrbitIcon(counterIconX, counterIconY, counterIconR, 1)
   love.graphics.setFont(font)
 
-  local panelX = math.floor(offsetX + 6 * uiScale)
-  local panelY = math.floor(counterY + counterTextH + 10 * uiScale)
+  local panelX = math.floor(offsetX + 12 * uiScale)
+  local panelY = math.floor(offsetY + 12 * uiScale)
   local panelW = math.floor(350 * uiScale)
   local padX = math.floor(8 * uiScale)
   local rowH = lineH + math.floor(5 * uiScale)
@@ -993,20 +993,18 @@ local function drawHud()
     btn.w = panelW - padX * 2
     btn.h = rowH
     local alpha = enabled and 1 or 0.40
-    setColorScaled(palette.nebulaA or palette.space, 1, 0.85)
-    love.graphics.rectangle("fill", btn.x, btn.y, btn.w, btn.h)
-    setColorScaled(palette.panelEdge, 1, alpha)
-    love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h)
-    setColorScaled(palette.text, 1, alpha)
+    local hovered = pointInRect(mouseX, mouseY, btn)
+    if hovered then
+      setColorScaled(swatch.brightest, 1, 0.95)
+      love.graphics.rectangle("fill", btn.x, btn.y, btn.w, btn.h)
+    end
+    local textColor = hovered and palette.space or palette.text
+    setColorScaled(textColor, 1, alpha)
     drawText(label, btn.x + math.floor(8 * uiScale), btn.y + rowTextInsetY)
     if status and status ~= "" then
       if orbitCost then
         local sw = font:getWidth(status)
-        local iconX = btn.x + btn.w - math.floor(12 * uiScale)
-        local iconY = btn.y + math.floor(btn.h * 0.5)
-        local iconGap = math.floor(20 * uiScale)
-        drawOrbitIcon(iconX - math.floor(7 * uiScale), iconY, ORBIT_ICON_SIZE * uiScale, alpha)
-        drawText(status, iconX - iconGap - sw, btn.y + rowTextInsetY)
+        drawText(status, btn.x + btn.w - sw - math.floor(8 * uiScale), btn.y + rowTextInsetY)
       else
         local sw = font:getWidth(status)
         drawText(status, btn.x + btn.w - sw - math.floor(8 * uiScale), btn.y + rowTextInsetY)
@@ -1029,10 +1027,6 @@ local function drawHud()
   local rowCount = 4
   local panelH = math.floor(6 * uiScale) + sectionCount * (lineH + math.floor(2 * uiScale)) + rowCount * (rowH + gap) + math.floor(4 * uiScale)
 
-  setColorScaled(palette.space, 1, 0.85)
-  love.graphics.rectangle("fill", panelX, panelY, panelW, panelH)
-  setColorScaled(palette.panelEdge, 1, 1)
-  love.graphics.rectangle("line", panelX, panelY, panelW, panelH)
   love.graphics.setScissor(panelX + 1, panelY + 1, panelW - 2, panelH - 2)
 
   drawHeader("generators")
@@ -1230,7 +1224,7 @@ local function updateBackgroundMusic(dt)
 end
 
 local function initUpgradeFx()
-  local ok, source = pcall(love.audio.newSource, "upgrade_fx.wav", "static")
+  local ok, source = pcall(love.audio.newSource, "upgrade_fx.mp3", "static")
   if not ok or not source then
     upgradeFx = nil
     return
