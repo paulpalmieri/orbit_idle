@@ -5,6 +5,26 @@ local LIGHT_X = 24
 local LIGHT_Y = GAME_H - 24
 local LIGHT_Z = 22
 local ORBIT_CONFIGS = {
+  megaPlanet = {
+    bandCapacity = 1,
+    baseRadius = 440,
+    bandStep = 90,
+    fixedAltitude = true,
+    tiltMin = 0.24,
+    tiltRange = 0.5,
+    speedMin = 0.08,
+    speedRange = 0.04,
+  },
+  planet = {
+    bandCapacity = 2,
+    baseRadius = 180,
+    bandStep = 56,
+    fixedAltitude = true,
+    tiltMin = 0.28,
+    tiltRange = 0.9,
+    speedMin = 0.16,
+    speedRange = 0.08,
+  },
   moon = {
     bandCapacity = 4,
     baseRadius = 100,
@@ -37,6 +57,8 @@ local ORBIT_CONFIGS = {
 }
 local BODY_VISUAL = {
   planetRadius = 30,
+  orbitPlanetRadius = 24,
+  megaPlanetRadius = 150,
   moonRadius = 10,
   satelliteRadius = 4,
   moonChildSatelliteRadius = 1.8,
@@ -62,6 +84,8 @@ local ORBIT_ICON_FLATTEN = 0.84
 local ORBIT_ICON_SIZE = 6
 local UI_FONT_SIZE = 24
 local MOON_COST = 50
+local PLANET_COST = 1000
+local MEGA_PLANET_COST = 5000
 local SATELLITE_COST = 5
 local MOON_SATELLITE_COST = 10
 local MAX_MOONS = 5
@@ -153,7 +177,9 @@ local orbitColorCycle = {
 }
 
 local state = {
-  orbits = 100,
+  orbits = 10000,
+  megaPlanets = {},
+  planets = {},
   moons = {},
   satellites = {},
   stars = {},
@@ -171,6 +197,8 @@ local state = {
 }
 
 local ui = {
+  buyMegaPlanetBtn = {x = 0, y = 0, w = 0, h = 0},
+  buyPlanetBtn = {x = 0, y = 0, w = 0, h = 0},
   buyMoonBtn = {x = 0, y = 0, w = 0, h = 0},
   buySatelliteBtn = {x = 0, y = 0, w = 0, h = 0},
   speedWaveBtn = {x = 0, y = 0, w = 0, h = 0},
@@ -383,6 +411,14 @@ local function moonCost()
   return MOON_COST
 end
 
+local function planetCost()
+  return PLANET_COST
+end
+
+local function megaPlanetCost()
+  return MEGA_PLANET_COST
+end
+
 local function satelliteCost()
   return SATELLITE_COST
 end
@@ -490,6 +526,68 @@ local function getOrbitCounterFont()
 end
 
 local updateOrbiterPosition
+
+local function addMegaPlanet()
+  local cost = megaPlanetCost()
+  if state.orbits < cost then
+    return false
+  end
+
+  state.orbits = state.orbits - cost
+
+  local megaPlanetIndex = #state.megaPlanets
+  local orbital = createOrbitalParams(ORBIT_CONFIGS.megaPlanet, megaPlanetIndex)
+  local megaPlanet = {
+    angle = orbital.angle,
+    radius = orbital.radius,
+    flatten = orbital.flatten,
+    depthScale = orbital.depthScale,
+    plane = orbital.plane,
+    speed = orbital.speed,
+    boost = 0,
+    boostDurations = {},
+    x = cx,
+    y = cy,
+    z = 0,
+    kind = "mega-planet",
+    revolutions = 0,
+  }
+
+  updateOrbiterPosition(megaPlanet)
+  table.insert(state.megaPlanets, megaPlanet)
+  return true
+end
+
+local function addPlanet()
+  local cost = planetCost()
+  if state.orbits < cost then
+    return false
+  end
+
+  state.orbits = state.orbits - cost
+
+  local planetIndex = #state.planets
+  local orbital = createOrbitalParams(ORBIT_CONFIGS.planet, planetIndex)
+  local planet = {
+    angle = orbital.angle,
+    radius = orbital.radius,
+    flatten = orbital.flatten,
+    depthScale = orbital.depthScale,
+    plane = orbital.plane,
+    speed = orbital.speed,
+    boost = 0,
+    boostDurations = {},
+    x = cx,
+    y = cy,
+    z = 0,
+    kind = "planet",
+    revolutions = 0,
+  }
+
+  updateOrbiterPosition(planet)
+  table.insert(state.planets, planet)
+  return true
+end
 
 local function addMoon()
   if #state.moons >= MAX_MOONS then
@@ -638,6 +736,12 @@ end
 
 local function pickPlanetImpulseTarget()
   local pool = {}
+  for _, megaPlanet in ipairs(state.megaPlanets) do
+    table.insert(pool, megaPlanet)
+  end
+  for _, planet in ipairs(state.planets) do
+    table.insert(pool, planet)
+  end
   for _, moon in ipairs(state.moons) do
     table.insert(pool, moon)
     local childSatellites = moon.childSatellites or {}
@@ -951,6 +1055,26 @@ local function drawMoon(moon)
   end
 end
 
+local function drawOrbitPlanet(planet)
+  if hasActiveBoost(planet) then
+    local baseTrailLen = math.min(planet.radius * 2.2, 28 + planet.boost * 36)
+    drawOrbitalTrail(planet, baseTrailLen, 0.5, 0.04)
+  end
+  local pr, pg, pb = computeOrbiterColor(planet.angle)
+  setColorDirect(pr, pg, pb, 1)
+  love.graphics.circle("fill", planet.x, planet.y, BODY_VISUAL.orbitPlanetRadius, 22)
+end
+
+local function drawMegaPlanet(megaPlanet)
+  if hasActiveBoost(megaPlanet) then
+    local baseTrailLen = math.min(megaPlanet.radius * 2.2, 36 + megaPlanet.boost * 44)
+    drawOrbitalTrail(megaPlanet, baseTrailLen, 0.56, 0.05)
+  end
+  local pr, pg, pb = computeOrbiterColor(megaPlanet.angle)
+  setColorDirect(pr, pg, pb, 1)
+  love.graphics.circle("fill", megaPlanet.x, megaPlanet.y, BODY_VISUAL.megaPlanetRadius, 30)
+end
+
 local function drawSatellite(satellite)
   if hasActiveBoost(satellite) then
     local baseTrailLen = math.min(satellite.radius * 2.2, 16 + satellite.boost * 22)
@@ -1021,7 +1145,11 @@ local function drawHud()
     return hovered
   end
 
+  local megaPlanetBuyCost = megaPlanetCost()
+  local planetBuyCost = planetCost()
   local moonBuyCost = moonCost()
+  local canBuyMegaPlanet = state.orbits >= megaPlanetBuyCost
+  local canBuyPlanet = state.orbits >= planetBuyCost
   local canBuyMoon = state.orbits >= moonBuyCost and #state.moons < MAX_MOONS
   local canBuySatellite = #state.satellites < MAX_SATELLITES and state.orbits >= satelliteCost()
   local satelliteStatus = tostring(satelliteCost())
@@ -1031,7 +1159,7 @@ local function drawHud()
   local clickStatus = state.speedClickUnlocked and "owned" or tostring(speedClickCost())
 
   local sectionCount = 2
-  local rowCount = 4
+  local rowCount = 6
   local panelH = math.floor(6 * uiScale) + sectionCount * (lineH + math.floor(2 * uiScale)) + rowCount * (rowH + gap) + math.floor(4 * uiScale)
 
   local hoveredTooltipLines
@@ -1040,6 +1168,38 @@ local function drawHud()
   love.graphics.setScissor(panelX + 1, panelY + 1, panelW - 2, panelH - 2)
 
   drawHeader("generators")
+  local megaPlanetHovered = drawRow(ui.buyMegaPlanetBtn, "mega planet", tostring(megaPlanetBuyCost), canBuyMegaPlanet, true)
+  if megaPlanetHovered then
+    hoveredTooltipBtn = ui.buyMegaPlanetBtn
+    hoveredTooltipLines = {
+      {
+        pre = "Adds a massive planet orbiting the core.",
+        hi = "",
+        post = "",
+      },
+      {
+        pre = "Size is ",
+        hi = "5x",
+        post = " the main planet.",
+      },
+    }
+  end
+  local planetHovered = drawRow(ui.buyPlanetBtn, "planet", tostring(planetBuyCost), canBuyPlanet, true)
+  if planetHovered then
+    hoveredTooltipBtn = ui.buyPlanetBtn
+    hoveredTooltipLines = {
+      {
+        pre = "Adds a large planet orbiting the core.",
+        hi = "",
+        post = "",
+      },
+      {
+        pre = "Size is ",
+        hi = "80%",
+        post = " of the main planet.",
+      },
+    }
+  end
   local moonHovered = drawRow(ui.buyMoonBtn, "moon", tostring(moonBuyCost), canBuyMoon, true)
   if moonHovered then
     hoveredTooltipBtn = ui.buyMoonBtn
@@ -1178,7 +1338,14 @@ local function getOrbiterTooltipLayout()
   local totalBoost = orbiter.boost + speedWaveBoostFor(orbiter)
   local currentRpm = orbiter.speed * (1 + totalBoost) * (60 / (math.pi * 2))
   local boostPercent = math.floor(totalBoost * 100 + 0.5)
-  local title = orbiter.kind == "satellite" and "selected satellite" or "selected moon"
+  local title = "selected moon"
+  if orbiter.kind == "satellite" then
+    title = "selected satellite"
+  elseif orbiter.kind == "planet" then
+    title = "selected planet"
+  elseif orbiter.kind == "mega-planet" then
+    title = "selected mega planet"
+  end
   local detailLines = {
     {pre = "revolutions ", hi = tostring(orbiter.revolutions), post = ""},
     {pre = "orbit radius ", hi = string.format("%.0f px", orbiter.radius), post = ""},
@@ -1546,6 +1713,42 @@ function love.update(dt)
     end
   end
 
+  for _, megaPlanet in ipairs(state.megaPlanets) do
+    local prev = megaPlanet.angle
+    updateOrbiterBoost(megaPlanet, dt)
+    local effectiveSpeed = megaPlanet.speed * (1 + megaPlanet.boost)
+    megaPlanet.angle = megaPlanet.angle + effectiveSpeed * dt
+
+    local prevTurns = math.floor(prev / TWO_PI)
+    local newTurns = math.floor(megaPlanet.angle / TWO_PI)
+    if newTurns > prevTurns then
+      local turnsGained = newTurns - prevTurns
+      state.orbits = state.orbits + turnsGained
+      megaPlanet.revolutions = megaPlanet.revolutions + turnsGained
+      spawnOrbitGainFx(megaPlanet.x, megaPlanet.y, turnsGained, BODY_VISUAL.megaPlanetRadius)
+    end
+
+    updateOrbiterPosition(megaPlanet)
+  end
+
+  for _, planet in ipairs(state.planets) do
+    local prev = planet.angle
+    updateOrbiterBoost(planet, dt)
+    local effectiveSpeed = planet.speed * (1 + planet.boost)
+    planet.angle = planet.angle + effectiveSpeed * dt
+
+    local prevTurns = math.floor(prev / TWO_PI)
+    local newTurns = math.floor(planet.angle / TWO_PI)
+    if newTurns > prevTurns then
+      local turnsGained = newTurns - prevTurns
+      state.orbits = state.orbits + turnsGained
+      planet.revolutions = planet.revolutions + turnsGained
+      spawnOrbitGainFx(planet.x, planet.y, turnsGained, BODY_VISUAL.orbitPlanetRadius)
+    end
+
+    updateOrbiterPosition(planet)
+  end
+
   for _, satellite in ipairs(state.satellites) do
     local prev = satellite.angle
     updateOrbiterBoost(satellite, dt)
@@ -1569,6 +1772,20 @@ end
 
 function love.mousepressed(x, y, button)
   if button ~= 1 then
+    return
+  end
+
+  if x >= ui.buyMegaPlanetBtn.x and x <= ui.buyMegaPlanetBtn.x + ui.buyMegaPlanetBtn.w and y >= ui.buyMegaPlanetBtn.y and y <= ui.buyMegaPlanetBtn.y + ui.buyMegaPlanetBtn.h then
+    if addMegaPlanet() then
+      playMenuBuyClickFx()
+    end
+    return
+  end
+
+  if x >= ui.buyPlanetBtn.x and x <= ui.buyPlanetBtn.x + ui.buyPlanetBtn.w and y >= ui.buyPlanetBtn.y and y <= ui.buyPlanetBtn.y + ui.buyPlanetBtn.h then
+    if addPlanet() then
+      playMenuBuyClickFx()
+    end
     return
   end
 
@@ -1633,6 +1850,34 @@ function love.mousepressed(x, y, button)
     end
   end
 
+  for i = #state.megaPlanets, 1, -1 do
+    local megaPlanet = state.megaPlanets[i]
+    local dx = wx - megaPlanet.x
+    local dy = wy - megaPlanet.y
+    local megaPlanetHitR = BODY_VISUAL.megaPlanetRadius + 2
+    if dx * dx + dy * dy <= megaPlanetHitR * megaPlanetHitR then
+      if state.selectedOrbiter ~= megaPlanet then
+        playClickFx(false)
+      end
+      state.selectedOrbiter = megaPlanet
+      return
+    end
+  end
+
+  for i = #state.planets, 1, -1 do
+    local planet = state.planets[i]
+    local dx = wx - planet.x
+    local dy = wy - planet.y
+    local orbitPlanetHitR = BODY_VISUAL.orbitPlanetRadius + 2
+    if dx * dx + dy * dy <= orbitPlanetHitR * orbitPlanetHitR then
+      if state.selectedOrbiter ~= planet then
+        playClickFx(false)
+      end
+      state.selectedOrbiter = planet
+      return
+    end
+  end
+
   for i = #state.satellites, 1, -1 do
     local satellite = state.satellites[i]
     local dx = wx - satellite.x
@@ -1668,6 +1913,10 @@ function love.draw()
 
   local back = {}
   local front = {}
+  local megaPlanetBack = {}
+  local megaPlanetFront = {}
+  local planetBack = {}
+  local planetFront = {}
   for _, m in ipairs(state.moons) do
     if m.z <= 0 then
       table.insert(back, m)
@@ -1678,7 +1927,31 @@ function love.draw()
 
   table.sort(back, function(a, b) return a.z < b.z end)
   table.sort(front, function(a, b) return a.z < b.z end)
+  for _, mp in ipairs(state.megaPlanets) do
+    if mp.z <= 0 then
+      table.insert(megaPlanetBack, mp)
+    else
+      table.insert(megaPlanetFront, mp)
+    end
+  end
+  table.sort(megaPlanetBack, function(a, b) return a.z < b.z end)
+  table.sort(megaPlanetFront, function(a, b) return a.z < b.z end)
+  for _, p in ipairs(state.planets) do
+    if p.z <= 0 then
+      table.insert(planetBack, p)
+    else
+      table.insert(planetFront, p)
+    end
+  end
+  table.sort(planetBack, function(a, b) return a.z < b.z end)
+  table.sort(planetFront, function(a, b) return a.z < b.z end)
 
+  for _, mp in ipairs(megaPlanetBack) do
+    drawMegaPlanet(mp)
+  end
+  for _, p in ipairs(planetBack) do
+    drawOrbitPlanet(p)
+  end
   for _, m in ipairs(back) do
     drawMoon(m)
   end
@@ -1704,6 +1977,12 @@ function love.draw()
   drawSelectedOrbit(true)
   for _, s in ipairs(satFront) do
     drawSatellite(s)
+  end
+  for _, mp in ipairs(megaPlanetFront) do
+    drawMegaPlanet(mp)
+  end
+  for _, p in ipairs(planetFront) do
+    drawOrbitPlanet(p)
   end
   for _, m in ipairs(front) do
     drawMoon(m)
