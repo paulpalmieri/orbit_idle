@@ -99,6 +99,7 @@ local GRAVITY_WELL_RADIAL_STRENGTH = 0.03
 local GRAVITY_WELL_SWIRL_STRENGTH = 0.0010
 local SPEED_WAVE_COST = 25
 local SPEED_CLICK_COST = 15
+local BLACK_HOLE_SHADER_COST = 100
 local SPEED_WAVE_CLICK_THRESHOLD = 10
 local SPEED_WAVE_MULTIPLIER = 1.5
 local SPEED_WAVE_DURATION = 5
@@ -241,6 +242,7 @@ local state = {
   planetBounceTime = 0,
   speedWaveUnlocked = false,
   speedClickUnlocked = false,
+  blackHoleShaderUnlocked = false,
   planetClickCount = 0,
   speedWaveTimer = 0,
   speedWaveRipples = {},
@@ -255,6 +257,7 @@ local ui = {
   buySatelliteBtn = {x = 0, y = 0, w = 0, h = 0},
   speedWaveBtn = {x = 0, y = 0, w = 0, h = 0},
   speedClickBtn = {x = 0, y = 0, w = 0, h = 0},
+  blackHoleShaderBtn = {x = 0, y = 0, w = 0, h = 0},
   moonAddSatelliteBtn = {x = 0, y = 0, w = 0, h = 0, visible = false, enabled = false},
 }
 
@@ -599,6 +602,10 @@ end
 
 local function speedClickCost()
   return SPEED_CLICK_COST
+end
+
+local function blackHoleShaderCost()
+  return BLACK_HOLE_SHADER_COST
 end
 
 local function createOrbitalParams(config, index)
@@ -1032,6 +1039,30 @@ local function buySpeedClick()
   end
   state.orbits = state.orbits - cost
   state.speedClickUnlocked = true
+  if upgradeFx then
+    local voice = upgradeFx:clone()
+    voice:setVolume(0)
+    local duration = voice:getDuration("seconds") or 0
+    if duration > UPGRADE_FX_START_OFFSET_SECONDS then
+      voice:seek(UPGRADE_FX_START_OFFSET_SECONDS, "seconds")
+    end
+    voice:play()
+    upgradeFxInstances[#upgradeFxInstances + 1] = {source = voice, age = 0}
+    bgMusicDuckTimer = BG_MUSIC_DUCK_SECONDS
+  end
+  return true
+end
+
+local function buyBlackHoleShader()
+  if state.blackHoleShaderUnlocked then
+    return false
+  end
+  local cost = blackHoleShaderCost()
+  if state.orbits < cost then
+    return false
+  end
+  state.orbits = state.orbits - cost
+  state.blackHoleShaderUnlocked = true
   if upgradeFx then
     local voice = upgradeFx:clone()
     voice:setVolume(0)
@@ -1550,11 +1581,13 @@ local function drawHud()
   local satelliteStatus = tostring(satelliteCost())
   local speedWaveReady = state.speedWaveUnlocked or state.orbits >= speedWaveCost()
   local speedClickReady = state.speedClickUnlocked or state.orbits >= speedClickCost()
+  local blackHoleShaderReady = state.blackHoleShaderUnlocked or state.orbits >= blackHoleShaderCost()
   local waveStatus = state.speedWaveUnlocked and (state.speedWaveTimer > 0 and "on" or tostring(state.planetClickCount % SPEED_WAVE_CLICK_THRESHOLD) .. "/" .. tostring(SPEED_WAVE_CLICK_THRESHOLD)) or tostring(speedWaveCost())
   local clickStatus = state.speedClickUnlocked and "owned" or tostring(speedClickCost())
+  local blackHoleShaderStatus = state.blackHoleShaderUnlocked and "owned" or tostring(blackHoleShaderCost())
 
   local sectionCount = 2
-  local rowCount = 6
+  local rowCount = 7
   local panelH = math.floor(6 * uiScale) + sectionCount * (lineH + math.floor(2 * uiScale)) + rowCount * (rowH + gap) + math.floor(4 * uiScale)
 
   local hoveredTooltipLines
@@ -1657,6 +1690,22 @@ local function drawHud()
       {
         pre = "Repeated hits on the same target ",
         hi = "stack",
+        post = ".",
+      },
+    }
+  end
+  local blackHoleShaderHovered = drawRow(ui.blackHoleShaderBtn, "black hole shader", blackHoleShaderStatus, blackHoleShaderReady, not state.blackHoleShaderUnlocked)
+  if blackHoleShaderHovered then
+    hoveredTooltipBtn = ui.blackHoleShaderBtn
+    hoveredTooltipLines = {
+      {
+        pre = "Enables the black hole distortion around the core.",
+        hi = "",
+        post = "",
+      },
+      {
+        pre = "This upgrade is ",
+        hi = "visual only",
         post = ".",
       },
     }
@@ -2372,6 +2421,11 @@ function love.mousepressed(x, y, button)
     return
   end
 
+  if x >= ui.blackHoleShaderBtn.x and x <= ui.blackHoleShaderBtn.x + ui.blackHoleShaderBtn.w and y >= ui.blackHoleShaderBtn.y and y <= ui.blackHoleShaderBtn.y + ui.blackHoleShaderBtn.h then
+    buyBlackHoleShader()
+    return
+  end
+
   if ui.moonAddSatelliteBtn.visible and x >= ui.moonAddSatelliteBtn.x and x <= ui.moonAddSatelliteBtn.x + ui.moonAddSatelliteBtn.w and y >= ui.moonAddSatelliteBtn.y and y <= ui.moonAddSatelliteBtn.y + ui.moonAddSatelliteBtn.h then
     if ui.moonAddSatelliteBtn.enabled then
       if addSatelliteToMoon(state.selectedOrbiter) then
@@ -2479,7 +2533,7 @@ function love.draw()
   love.graphics.setCanvas()
   love.graphics.clear(palette.space)
   love.graphics.setColor(1, 1, 1, 1)
-  if gravityWellShader then
+  if gravityWellShader and state.blackHoleShaderUnlocked then
     local coreR = clamp((state.planetVisualRadius or BODY_VISUAL.planetRadius) / GAME_H, 0.002, 0.45)
     local innerR = clamp(coreR * GRAVITY_WELL_INNER_SCALE, 0.001, coreR - 0.0005)
     local outerR = clamp(coreR * GRAVITY_WELL_RADIUS_SCALE, coreR + 0.01, 0.95)
