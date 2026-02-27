@@ -18,7 +18,7 @@ local ZOOM_MAX = 2
 local PERSPECTIVE_Z_STRENGTH = 0.10
 local PERSPECTIVE_MIN_SCALE = 0.88
 local PERSPECTIVE_MAX_SCALE = 1.18
-local DEPTH_BIAS_SCALE = 0.0009
+local DEPTH_SORT_HYSTERESIS = 0.035
 local BODY_SHADE_DARK_FLOOR_TONE = 0.22
 local BODY_SHADE_ECLIPSE_THRESHOLD = 0.16
 local BODY_SHADE_CONTRAST = 1.75
@@ -374,12 +374,33 @@ local function updateOrbiterLight(orbiter)
   orbiter.light = cameraLightAt(orbiter.x, orbiter.y, orbiter.z)
 end
 
+local function orbiterRenderDepth(orbiter)
+  if not orbiter then
+    return 0
+  end
+  if orbiter.sortDepth == nil then
+    return orbiter.z or 0
+  end
+  return orbiter.sortDepth
+end
+
+local function updateOrbiterRenderDepth(orbiter)
+  local targetDepth = orbiter.z or 0
+  local depth = orbiter.sortDepth
+  if depth == nil then
+    orbiter.sortDepth = targetDepth
+    return
+  end
+  if targetDepth > depth + DEPTH_SORT_HYSTERESIS then
+    orbiter.sortDepth = targetDepth - DEPTH_SORT_HYSTERESIS
+  elseif targetDepth < depth - DEPTH_SORT_HYSTERESIS then
+    orbiter.sortDepth = targetDepth + DEPTH_SORT_HYSTERESIS
+  end
+end
+
 local function assignRenderOrder(orbiter)
   state.nextRenderOrder = state.nextRenderOrder + 1
   orbiter.renderOrder = state.nextRenderOrder
-  local n = state.nextRenderOrder
-  local normalized = ((n % 1021) / 1021) - 0.5
-  orbiter.depthBias = normalized * DEPTH_BIAS_SCALE
 end
 
 local function perspectiveScaleForZ(z)
@@ -895,6 +916,7 @@ local function addSatelliteToMoon(moon)
   child.x = moon.x + ox * cp - oy * sp
   child.y = moon.y + ox * sp + oy * cp
   child.z = moon.z + (child.zBase or 0) + math.sin(child.angle) * (child.depthScale or 1)
+  updateOrbiterRenderDepth(child)
   updateOrbiterLight(child)
   assignRenderOrder(child)
   table.insert(moon.childSatellites, child)
@@ -911,6 +933,7 @@ updateOrbiterPosition = function(orbiter)
   orbiter.x = cx + ox * cp - oy * sp
   orbiter.y = cy + ox * sp + oy * cp
   orbiter.z = (orbiter.zBase or 0) + math.sin(orbiter.angle) * (orbiter.depthScale or 1)
+  updateOrbiterRenderDepth(orbiter)
   updateOrbiterLight(orbiter)
 end
 
@@ -1455,11 +1478,10 @@ local function orbiterHitRadius(orbiter)
 end
 
 local function depthSortOrbiters(a, b)
-  local az = (a.z or 0) + (a.depthBias or 0)
-  local bz = (b.z or 0) + (b.depthBias or 0)
-  local dz = az - bz
-  if math.abs(dz) > 0.00001 then
-    return dz < 0
+  local az = orbiterRenderDepth(a)
+  local bz = orbiterRenderDepth(b)
+  if az ~= bz then
+    return az < bz
   end
   return (a.renderOrder or 0) < (b.renderOrder or 0)
 end
@@ -1850,7 +1872,8 @@ local function drawOrbiterTooltipConnector(frontPass)
   end
   local orbiter = layout.orbiter
 
-  if (frontPass and orbiter.z <= 0) or ((not frontPass) and orbiter.z > 0) then
+  local renderDepth = orbiterRenderDepth(orbiter)
+  if (frontPass and renderDepth <= 0) or ((not frontPass) and renderDepth > 0) then
     return
   end
 
@@ -2308,6 +2331,7 @@ function love.update(dt)
       child.y = sy
       child.z = moon.z + (child.zBase or 0) + math.sin(child.angle) * (child.depthScale or 1)
       child.parentMoon = moon
+      updateOrbiterRenderDepth(child)
       updateOrbiterLight(child)
 
       local prevTurns = math.floor(prev / TWO_PI)
@@ -2506,8 +2530,7 @@ function love.draw()
   local renderOrbiters = collectRenderOrbiters()
   local firstFront = #renderOrbiters + 1
   for i = 1, #renderOrbiters do
-    local sortZ = (renderOrbiters[i].z or 0) + (renderOrbiters[i].depthBias or 0)
-    if sortZ > 0 then
+    if orbiterRenderDepth(renderOrbiters[i]) > 0 then
       firstFront = i
       break
     end
