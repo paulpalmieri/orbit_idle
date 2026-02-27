@@ -1134,11 +1134,7 @@ local function drawBackground()
   for _, s in ipairs(state.stars) do
     local twinkle = (math.sin(state.time * s.speed + s.phase) + 1) * 0.5
     if twinkle > 0.45 then
-      if s.kind == 0 then
-        love.graphics.setColor(palette.starA)
-      else
-        love.graphics.setColor(palette.starB)
-      end
+      love.graphics.setColor(palette.accent)
       love.graphics.rectangle("fill", s.x, s.y, 1, 1)
     end
   end
