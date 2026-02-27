@@ -661,7 +661,10 @@ end
 local function recomputeViewport()
   local w, h = love.graphics.getDimensions()
   local rawScale = math.min(w / GAME_W, h / GAME_H)
-  if rawScale >= 1 then
+  if state.borderlessFullscreen then
+    -- In borderless fullscreen, use exact scale so the game fills the display.
+    scale = rawScale
+  elseif rawScale >= 1 then
     scale = math.max(1, math.floor(rawScale + 1e-6))
   else
     -- Use reciprocal integer downscale steps (1/2, 1/3, ...) to avoid soft sampling.
