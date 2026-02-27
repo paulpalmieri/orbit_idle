@@ -93,6 +93,10 @@ local PLANET_IMPULSE_DURATION = 10
 local PLANET_IMPULSE_RISE_RATE = 4.5
 local PLANET_IMPULSE_FALL_RATE = 6.5
 local PLANET_BOUNCE_DURATION = 0.12
+local GRAVITY_WELL_INNER_SCALE = 0.01
+local GRAVITY_WELL_RADIUS_SCALE = 1.3
+local GRAVITY_WELL_RADIAL_STRENGTH = 0.03
+local GRAVITY_WELL_SWIRL_STRENGTH = 0.0010
 local SPEED_WAVE_COST = 25
 local SPEED_CLICK_COST = 15
 local SPEED_WAVE_CLICK_THRESHOLD = 10
@@ -128,6 +132,22 @@ local CLICK_FX_PITCH_CLOSE = 0.88
 local CLICK_FX_MENU_PITCH_MIN = 0.92
 local CLICK_FX_MENU_PITCH_MAX = 1.08
 local SELECTED_ORBIT_COLOR = {1.0000, 0.5098, 0.4549, 1}
+local SPHERE_SHADE_STYLE_OFF = {
+  contrast = 1.08,
+  darkFloor = BODY_SHADE_DARK_FLOOR_TONE,
+  toneSteps = 0,
+  facetSides = 0,
+  ditherStrength = 0,
+  ditherScale = 1,
+}
+local SPHERE_SHADE_STYLE_ON = {
+  contrast = 0.94,
+  darkFloor = BODY_SHADE_DARK_FLOOR_TONE + 0.01,
+  toneSteps = 12,
+  facetSides = 0,
+  ditherStrength = 0.012,
+  ditherScale = 1.60,
+}
 
 local canvas
 local uiFont
@@ -144,6 +164,7 @@ local upgradeFxInstances = {}
 local clickFx
 local sphereShader
 local spherePixel
+local gravityWellShader
 local scale = 1
 local offsetX = 0
 local offsetY = 0
@@ -214,6 +235,7 @@ local state = {
   nextRenderOrder = 0,
   selectedOrbiter = nil,
   selectedLightSource = false,
+  sphereDitherEnabled = true,
   borderlessFullscreen = false,
   orbitPopTexts = {},
   planetBounceTime = 0,
@@ -223,6 +245,7 @@ local state = {
   speedWaveTimer = 0,
   speedWaveRipples = {},
   speedWaveText = nil,
+  planetVisualRadius = BODY_VISUAL.planetRadius,
 }
 
 local ui = {
@@ -234,6 +257,17 @@ local ui = {
   speedClickBtn = {x = 0, y = 0, w = 0, h = 0},
   moonAddSatelliteBtn = {x = 0, y = 0, w = 0, h = 0, visible = false, enabled = false},
 }
+
+local function activeSphereShadeStyle()
+  if state.sphereDitherEnabled then
+    return SPHERE_SHADE_STYLE_ON
+  end
+  return SPHERE_SHADE_STYLE_OFF
+end
+
+local function toggleSphereShadeStyle()
+  state.sphereDitherEnabled = not state.sphereDitherEnabled
+end
 
 local function clamp(v, lo, hi)
   if v < lo then return lo end
@@ -1106,6 +1140,7 @@ local function drawLitSphere(x, y, z, radius, r, g, b, lightScale, segments)
   local px, py, projectScale = projectWorldPoint(x, y, z or 0)
   local pr = math.max(0.6, radius * projectScale)
   local sideCount = segments or 24
+  local shadeStyle = activeSphereShadeStyle()
   local lightX, lightY, lightZ = sideLightWorldPosition()
   local lightPx, lightPy = projectWorldPoint(lightX, lightY, lightProjectionZ(lightZ))
   local objDepth = (z or 0) * CAMERA_LIGHT_Z_SCALE
@@ -1153,8 +1188,12 @@ local function drawLitSphere(x, y, z, radius, r, g, b, lightScale, segments)
     sphereShader:send("lightVec", {lx, ly, lz})
     sphereShader:send("lightPower", shaderLightPower)
     sphereShader:send("ambient", shaderAmbient)
-    sphereShader:send("contrast", 1.08)
-    sphereShader:send("darkFloor", BODY_SHADE_DARK_FLOOR_TONE)
+    sphereShader:send("contrast", shadeStyle.contrast or 1.08)
+    sphereShader:send("darkFloor", clamp(shadeStyle.darkFloor or BODY_SHADE_DARK_FLOOR_TONE, 0, 1))
+    sphereShader:send("toneSteps", shadeStyle.toneSteps or 0)
+    sphereShader:send("facetSides", shadeStyle.facetSides or 0)
+    sphereShader:send("ditherStrength", shadeStyle.ditherStrength or 0)
+    sphereShader:send("ditherScale", shadeStyle.ditherScale or 1)
     love.graphics.setColor(1, 1, 1, 1)
     love.graphics.draw(spherePixel, px - pr, py - pr, 0, pr * 2, pr * 2)
     love.graphics.setShader(prevShader)
@@ -1170,9 +1209,11 @@ local function drawPlanet()
   local kick = math.sin(t * math.pi)
   local bounceScale = 1 + kick * 0.14 * (1 - t)
   local px, py, projScale = projectWorldPoint(cx, cy, 0)
-  local pr = BODY_VISUAL.planetRadius * bounceScale * projScale
+  local pr = math.max(3, BODY_VISUAL.planetRadius * bounceScale * projScale)
+
   setColorDirect(0, 0, 0, 1)
-  love.graphics.circle("fill", px, py, pr, 40)
+  love.graphics.circle("fill", px, py, pr, 44)
+  state.planetVisualRadius = pr * zoom
 end
 
 local function drawLightSource(frontPass)
@@ -1669,11 +1710,13 @@ local function drawHud()
 
   love.graphics.setColor(palette.muted)
   local viewportBottom = offsetY + GAME_H * scale
-  local helpY1 = math.floor(viewportBottom - lineH * 2 - 8 * uiScale)
-  local helpY2 = math.floor(viewportBottom - lineH - 4 * uiScale)
+  local helpY1 = math.floor(viewportBottom - lineH * 3 - 12 * uiScale)
+  local helpY2 = math.floor(viewportBottom - lineH * 2 - 8 * uiScale)
+  local helpY3 = math.floor(viewportBottom - lineH - 4 * uiScale)
   local helpX = panelX
   drawText(string.format("zoom %.2fx  scroll to zoom", zoom), helpX, helpY1)
-  drawText("b fullscreen", helpX, helpY2)
+  drawText("l dither " .. (state.sphereDitherEnabled and "on" or "off"), helpX, helpY2)
+  drawText("b fullscreen", helpX, helpY3)
 end
 
 local function getOrbiterTooltipLayout()
@@ -1850,6 +1893,10 @@ local function initSphereShader()
     extern float ambient;
     extern float contrast;
     extern float darkFloor;
+    extern float toneSteps;
+    extern float facetSides;
+    extern float ditherStrength;
+    extern float ditherScale;
     extern vec3 pal0;
     extern vec3 pal1;
     extern vec3 pal2;
@@ -1882,8 +1929,17 @@ local function initSphereShader()
         return vec4(0.0);
       }
 
-      float nz = sqrt(max(0.0, 1.0 - r2));
-      vec3 n = normalize(vec3(p.x, -p.y, nz));
+      vec2 nxy = p;
+      if (facetSides > 2.5) {
+        float angle = atan(nxy.y, nxy.x);
+        float step = 6.28318530718 / facetSides;
+        angle = floor((angle + step * 0.5) / step) * step;
+        float radius = length(nxy);
+        nxy = vec2(cos(angle), sin(angle)) * radius;
+      }
+
+      float nz = sqrt(max(0.0, 1.0 - dot(nxy, nxy)));
+      vec3 n = normalize(vec3(nxy.x, -nxy.y, nz));
       vec3 l = normalize(lightVec);
       float ndotl = dot(n, l);
       float wrap = 0.72;
@@ -1898,6 +1954,15 @@ local function initSphereShader()
       float tone = clamp((shade - 0.5) * contrast + 0.5, 0.0, 1.0);
       tone = max(tone, darkFloor);
       tone = clamp(tone + (baseL - 0.5) * 0.16, 0.0, 1.0);
+      if (ditherStrength > 0.0) {
+        float scale = max(ditherScale, 0.001);
+        float pattern = fract(sin(dot(floor(screen_coords * scale), vec2(12.9898, 78.233))) * 43758.5453);
+        tone = clamp(tone + (pattern - 0.5) * ditherStrength, 0.0, 1.0);
+      }
+      if (toneSteps > 1.0) {
+        float levels = max(2.0, toneSteps);
+        tone = floor(tone * (levels - 1.0) + 0.5) / (levels - 1.0);
+      }
 
       vec3 palColor = paletteRamp(tone);
       return vec4(palColor, 1.0) * color;
@@ -1917,6 +1982,60 @@ local function initSphereShader()
   sphereShader:send("pal4", {swatch.mid[1], swatch.mid[2], swatch.mid[3]})
   sphereShader:send("pal5", {swatch.bright[1], swatch.bright[2], swatch.bright[3]})
   sphereShader:send("pal6", {swatch.brightest[1], swatch.brightest[2], swatch.brightest[3]})
+end
+
+local function initGravityWellShader()
+  local ok, shaderOrErr = pcall(love.graphics.newShader, [[
+    extern vec2 centerUv;
+    extern float aspect;
+    extern float innerR;
+    extern float coreR;
+    extern float outerR;
+    extern float radialStrength;
+    extern float swirlStrength;
+
+    vec4 effect(vec4 color, Image texture, vec2 texture_coords, vec2 screen_coords) {
+      vec2 uv = texture_coords;
+      vec2 p = uv - centerUv;
+      p.x *= aspect;
+      float r = length(p);
+      if (r <= innerR || r >= outerR) {
+        return Texel(texture, uv) * color;
+      }
+
+      float span = max(0.0001, outerR - innerR);
+      float t = clamp((r - innerR) / span, 0.0, 1.0);
+      float borderPos = clamp((coreR - innerR) / span, 0.001, 0.999);
+      float safeR = max(r, 0.000001);
+      float edgeWidth = 0.12;
+      float edgeIn = smoothstep(0.0, edgeWidth, t);
+      float edgeOut = 1.0 - smoothstep(1.0 - edgeWidth, 1.0, t);
+      float baseBand = edgeIn * edgeOut;
+      float insideSpan = max(borderPos, 0.001);
+      float outsideSpan = max(1.0 - borderPos, 0.001);
+      float distIn = (borderPos - t) / insideSpan;
+      float distOut = (t - borderPos) / outsideSpan;
+      float distToBorder = mix(distIn, distOut, step(borderPos, t));
+      float borderPeak = 1.0 - smoothstep(0.0, 1.0, distToBorder);
+      float well = baseBand * (0.58 + borderPeak * 0.42);
+      vec2 dir = p / safeR;
+      vec2 tangent = vec2(-dir.y, dir.x);
+
+      float radial = radialStrength * well * (0.92 + borderPeak * 0.24);
+      float swirl = swirlStrength * well * (0.82 + borderPeak * 0.18);
+      vec2 warped = p + dir * radial + tangent * swirl;
+      vec2 sampleUv = centerUv + vec2(warped.x / aspect, warped.y);
+      sampleUv = clamp(sampleUv, vec2(0.0), vec2(1.0));
+      return Texel(texture, sampleUv) * color;
+    }
+  ]])
+
+  if not ok then
+    gravityWellShader = nil
+    return
+  end
+
+  gravityWellShader = shaderOrErr
 end
 
 local function initBackgroundMusic()
@@ -2046,6 +2165,7 @@ function love.load()
   canvas = love.graphics.newCanvas(GAME_W, GAME_H)
   canvas:setFilter("nearest", "nearest")
   initSphereShader()
+  initGravityWellShader()
   initBackgroundMusic()
   initUpgradeFx()
   initClickFx()
@@ -2070,6 +2190,8 @@ end
 function love.keypressed(key)
   if key == "b" then
     setBorderlessFullscreen(not state.borderlessFullscreen)
+  elseif key == "l" then
+    toggleSphereShadeStyle()
   end
 end
 
@@ -2357,7 +2479,24 @@ function love.draw()
   love.graphics.setCanvas()
   love.graphics.clear(palette.space)
   love.graphics.setColor(1, 1, 1, 1)
-  love.graphics.draw(canvas, offsetX, offsetY, 0, scale, scale)
+  if gravityWellShader then
+    local coreR = clamp((state.planetVisualRadius or BODY_VISUAL.planetRadius) / GAME_H, 0.002, 0.45)
+    local innerR = clamp(coreR * GRAVITY_WELL_INNER_SCALE, 0.001, coreR - 0.0005)
+    local outerR = clamp(coreR * GRAVITY_WELL_RADIUS_SCALE, coreR + 0.01, 0.95)
+    local prevShader = love.graphics.getShader()
+    love.graphics.setShader(gravityWellShader)
+    gravityWellShader:send("centerUv", {cx / GAME_W, cy / GAME_H})
+    gravityWellShader:send("aspect", GAME_W / GAME_H)
+    gravityWellShader:send("innerR", innerR)
+    gravityWellShader:send("coreR", coreR)
+    gravityWellShader:send("outerR", outerR)
+    gravityWellShader:send("radialStrength", GRAVITY_WELL_RADIAL_STRENGTH)
+    gravityWellShader:send("swirlStrength", GRAVITY_WELL_SWIRL_STRENGTH)
+    love.graphics.draw(canvas, offsetX, offsetY, 0, scale, scale)
+    love.graphics.setShader(prevShader)
+  else
+    love.graphics.draw(canvas, offsetX, offsetY, 0, scale, scale)
+  end
 
   love.graphics.setFont(getUiScreenFont())
   drawSpeedWaveText()
