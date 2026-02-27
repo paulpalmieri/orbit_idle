@@ -1,9 +1,27 @@
 local GAME_W = 1280
 local GAME_H = 720
 local TWO_PI = math.pi * 2
-local LIGHT_X = 24
-local LIGHT_Y = GAME_H - 24
-local LIGHT_Z = 22
+local CAMERA_LIGHT_HEIGHT = 280
+local CAMERA_LIGHT_Z_SCALE = 220
+local CAMERA_LIGHT_AMBIENT = 0.10
+local CAMERA_LIGHT_INTENSITY = 2.85
+local CAMERA_LIGHT_FALLOFF = 1 / (900 * 900)
+local LIGHT_ORBIT_PERIOD_SECONDS = 120
+local LIGHT_ORBIT_RADIUS_X = GAME_W * 0.62
+local LIGHT_ORBIT_RADIUS_Y = GAME_H * 0.42
+local LIGHT_ORBIT_Z_BASE = 0.38
+local LIGHT_ORBIT_Z_VARIATION = 0.16
+local LIGHT_SOURCE_MARKER_RADIUS = 8
+local LIGHT_SOURCE_HIT_PADDING = 6
+local ZOOM_MIN = 0.55
+local ZOOM_MAX = 2
+local PERSPECTIVE_Z_STRENGTH = 0.10
+local PERSPECTIVE_MIN_SCALE = 0.88
+local PERSPECTIVE_MAX_SCALE = 1.18
+local DEPTH_BIAS_SCALE = 0.0009
+local BODY_SHADE_DARK_FLOOR_TONE = 0.22
+local BODY_SHADE_ECLIPSE_THRESHOLD = 0.16
+local BODY_SHADE_CONTRAST = 1.75
 local ORBIT_CONFIGS = {
   megaPlanet = {
     bandCapacity = 1,
@@ -40,6 +58,9 @@ local ORBIT_CONFIGS = {
     baseRadius = 40,
     bandStep = 8,
     fixedAltitude = true,
+    altitudeCapacity = 6,
+    altitudeSlotStep = 0.11,
+    altitudeBandStep = 0.20,
     tiltMin = 0.30,
     tiltRange = 1.2,
     speedMin = 0.70,
@@ -49,6 +70,9 @@ local ORBIT_CONFIGS = {
     bandCapacity = 4,
     baseRadius = 10,
     bandStep = 2.0,
+    altitudeCapacity = 4,
+    altitudeSlotStep = 0.08,
+    altitudeBandStep = 0.12,
     tiltMin = 0.30,
     tiltRange = 1.2,
     speedMin = 0.90,
@@ -118,6 +142,8 @@ local bgMusicDuckTimer = 0
 local upgradeFx
 local upgradeFxInstances = {}
 local clickFx
+local sphereShader
+local spherePixel
 local scale = 1
 local offsetX = 0
 local offsetY = 0
@@ -182,9 +208,12 @@ local state = {
   planets = {},
   moons = {},
   satellites = {},
+  renderOrbiters = {},
   stars = {},
   time = 0,
+  nextRenderOrder = 0,
   selectedOrbiter = nil,
+  selectedLightSource = false,
   borderlessFullscreen = false,
   orbitPopTexts = {},
   planetBounceTime = 0,
@@ -225,18 +254,119 @@ local function pointInRect(px, py, rect)
   return px >= rect.x and px <= rect.x + rect.w and py >= rect.y and py <= rect.y + rect.h
 end
 
-local function depthLight(z, ambient, intensity, x, y)
-  local t = clamp((z + 1) * 0.5, 0, 1)
-  local progressiveBlend = t * 0.55 + smoothstep(t) * 0.45
-  local pointBlend = 1
-  if x and y then
-    local dx = LIGHT_X - x
-    local dy = LIGHT_Y - y
-    local dz = LIGHT_Z - z
-    local distSq = dx * dx + dy * dy + dz * dz
-    pointBlend = 1 / (1 + distSq / 220000)
+local function sideLightWorldPosition()
+  local cycle = (state.time % LIGHT_ORBIT_PERIOD_SECONDS) / LIGHT_ORBIT_PERIOD_SECONDS
+  -- Start from the left and orbit the playfield over two minutes.
+  local a = cycle * TWO_PI + math.pi
+  local x = cx + math.cos(a) * LIGHT_ORBIT_RADIUS_X
+  local y = cy + math.sin(a) * LIGHT_ORBIT_RADIUS_Y
+  local z = LIGHT_ORBIT_Z_BASE + math.sin(a + math.pi * 0.5) * LIGHT_ORBIT_Z_VARIATION
+  return x, y, z
+end
+
+local function lightProjectionZ(z)
+  return (z or 0) + (CAMERA_LIGHT_HEIGHT / zoom) / CAMERA_LIGHT_Z_SCALE
+end
+
+local function lightDepthForZ(z)
+  return lightProjectionZ(z) * CAMERA_LIGHT_Z_SCALE
+end
+
+local function planetShadowFactorAt(x, y, z)
+  local lightX, lightY, lightZ = sideLightWorldPosition()
+  local lightDepth = lightDepthForZ(lightZ)
+
+  local dirX = lightX - cx
+  local dirY = lightY - cy
+  local dirZ = lightDepth
+  local dirLen = math.sqrt(dirX * dirX + dirY * dirY + dirZ * dirZ)
+  if dirLen < 0.0001 then
+    return 1
   end
-  return clamp(ambient + progressiveBlend * intensity * pointBlend, 0, 1.25)
+
+  dirX = dirX / dirLen
+  dirY = dirY / dirLen
+  dirZ = dirZ / dirLen
+
+  local vx = x - cx
+  local vy = y - cy
+  local vz = (z or 0) * CAMERA_LIGHT_Z_SCALE
+
+  -- Behind the planet relative to the side light.
+  local along = -(vx * dirX + vy * dirY + vz * dirZ)
+  if along <= 0 then
+    return 1
+  end
+
+  local ax = -dirX * along
+  local ay = -dirY * along
+  local az = -dirZ * along
+  local offX = vx - ax
+  local offY = vy - ay
+  local offZ = vz - az
+  local radial = math.sqrt(offX * offX + offY * offY + offZ * offZ)
+
+  local shadowRadius = BODY_VISUAL.planetRadius * (1 + along / math.max(1, dirLen * 0.9))
+  local softEdge = shadowRadius * 0.60 + 6
+  if radial >= shadowRadius + softEdge then
+    return 1
+  end
+
+  local edgeT = clamp((radial - shadowRadius) / softEdge, 0, 1)
+  local coreShadow = 1 - smoothstep(edgeT)
+  local depthStrength = 1 - math.exp(-along / (BODY_VISUAL.planetRadius * 1.6))
+  local shadowStrength = coreShadow * depthStrength * 0.90
+  return clamp(1 - shadowStrength, 0.02, 1)
+end
+
+local function cameraLightAt(x, y, z)
+  local lightX, lightY, lightZ = sideLightWorldPosition()
+  local depth = (z or 0) * CAMERA_LIGHT_Z_SCALE
+  local lightDepth = lightDepthForZ(lightZ)
+  local dx = lightX - x
+  local dy = lightY - y
+  local dz = lightDepth - depth
+  local distSq = dx * dx + dy * dy + dz * dz
+  local attenuation = 1 / (1 + distSq * CAMERA_LIGHT_FALLOFF)
+  local direct = CAMERA_LIGHT_AMBIENT + attenuation * CAMERA_LIGHT_INTENSITY
+  local shadow = planetShadowFactorAt(x, y, z)
+  return clamp(direct * shadow, 0.01, 1.25)
+end
+
+local function updateOrbiterLight(orbiter)
+  orbiter.light = cameraLightAt(orbiter.x, orbiter.y, orbiter.z)
+end
+
+local function assignRenderOrder(orbiter)
+  state.nextRenderOrder = state.nextRenderOrder + 1
+  orbiter.renderOrder = state.nextRenderOrder
+  local n = state.nextRenderOrder
+  local normalized = ((n % 1021) / 1021) - 0.5
+  orbiter.depthBias = normalized * DEPTH_BIAS_SCALE
+end
+
+local function perspectiveScaleForZ(z)
+  local denom = 1 - (z or 0) * PERSPECTIVE_Z_STRENGTH
+  if denom < 0.35 then
+    denom = 0.35
+  end
+  return clamp(1 / denom, PERSPECTIVE_MIN_SCALE, PERSPECTIVE_MAX_SCALE)
+end
+
+local function projectWorldPoint(x, y, z)
+  local scale = perspectiveScaleForZ(z or 0)
+  return cx + (x - cx) * scale, cy + (y - cy) * scale, scale
+end
+
+local function lightSourceProjected()
+  local lightX, lightY, lightZ = sideLightWorldPosition()
+  local projectedZ = lightProjectionZ(lightZ)
+  local px, py, projectScale = projectWorldPoint(lightX, lightY, projectedZ)
+  return lightX, lightY, lightZ, projectedZ, px, py, projectScale
+end
+
+local function lightSourceHitRadius(projectScale)
+  return math.max(4, (LIGHT_SOURCE_MARKER_RADIUS + LIGHT_SOURCE_HIT_PADDING) * projectScale)
 end
 
 local function nearestPaletteSwatch(r, g, b)
@@ -291,14 +421,6 @@ local function setColorBlendScaled(colorA, colorB, blend, lightScale, alphaScale
   )
 end
 
-local function setOrbiterShadedColor(backColor, sideBlend, light, alphaScale)
-  local faceBlend = clamp(sideBlend or 0, 0, 1)
-  local lightBlend = smoothstep(clamp(light or 0, 0, 1))
-  local blend = clamp(faceBlend * 0.68 + lightBlend * 0.32, 0, 1)
-  -- Orbiters always peak at the brightest swatch color.
-  setColorBlendScaled(backColor, palette.planetLight, blend, 1, alphaScale or 1)
-end
-
 local function sampleOrbitColorCycle(phase)
   local size = #orbitColorCycle
   local p = phase - math.floor(phase)
@@ -321,6 +443,15 @@ end
 
 local function setColorDirect(r, g, b, alpha)
   love.graphics.setColor(clamp(r, 0, 1), clamp(g, 0, 1), clamp(b, 0, 1), clamp(alpha or 1, 0, 1))
+end
+
+local function setLitColorDirect(r, g, b, lightScale, alpha)
+  local light = lightScale or 1
+  local sr = clamp(r * light, 0, 1)
+  local sg = clamp(g * light, 0, 1)
+  local sb = clamp(b * light, 0, 1)
+  local sw = nearestPaletteSwatch(sr, sg, sb)
+  love.graphics.setColor(sw[1], sw[2], sw[3], clamp(alpha or 1, 0, 1))
 end
 
 local function drawText(text, x, y)
@@ -402,7 +533,8 @@ local function drawOrbitGainFx()
     local fade = 1 - smoothstep(t)
     local drawX = (pop.x - cx) * zoom + cx
     local drawY = (pop.y - cy) * zoom + cy
-    setColorDirect(swatch.brightest[1], swatch.brightest[2], swatch.brightest[3], fade)
+    local popLight = cameraLightAt(pop.x, pop.y, 0)
+    setLitColorDirect(swatch.brightest[1], swatch.brightest[2], swatch.brightest[3], popLight, fade)
     drawText(pop.text, drawX, drawY)
   end
 end
@@ -439,11 +571,21 @@ local function createOrbitalParams(config, index)
   local band = config.fixedAltitude and 0 or math.floor(index / config.bandCapacity)
   local radiusJitter = config.fixedAltitude and 0 or (love.math.random() * 2 - 1)
   local tilt = config.tiltMin + love.math.random() * config.tiltRange
+  local altitudeCapacity = math.max(1, config.altitudeCapacity or 1)
+  local altitudeBand = math.floor(index / altitudeCapacity)
+  local altitudeSlot = index % altitudeCapacity
+  local centeredSlot = altitudeSlot - (altitudeCapacity - 1) * 0.5
+  local zBase = centeredSlot * (config.altitudeSlotStep or 0) + altitudeBand * (config.altitudeBandStep or 0)
+  local altitudeJitter = config.altitudeJitter or 0
+  if altitudeJitter ~= 0 then
+    zBase = zBase + (love.math.random() * 2 - 1) * altitudeJitter
+  end
   return {
     angle = love.math.random() * math.pi * 2,
     radius = config.baseRadius + band * config.bandStep + radiusJitter,
     flatten = math.cos(tilt),
     depthScale = math.sin(tilt),
+    zBase = zBase,
     plane = love.math.random() * math.pi * 2,
     speed = config.speedMin + love.math.random() * config.speedRange,
   }
@@ -542,6 +684,7 @@ local function addMegaPlanet()
     radius = orbital.radius,
     flatten = orbital.flatten,
     depthScale = orbital.depthScale,
+    zBase = orbital.zBase or 0,
     plane = orbital.plane,
     speed = orbital.speed,
     boost = 0,
@@ -549,11 +692,13 @@ local function addMegaPlanet()
     x = cx,
     y = cy,
     z = 0,
+    light = 1,
     kind = "mega-planet",
     revolutions = 0,
   }
 
   updateOrbiterPosition(megaPlanet)
+  assignRenderOrder(megaPlanet)
   table.insert(state.megaPlanets, megaPlanet)
   return true
 end
@@ -573,6 +718,7 @@ local function addPlanet()
     radius = orbital.radius,
     flatten = orbital.flatten,
     depthScale = orbital.depthScale,
+    zBase = orbital.zBase or 0,
     plane = orbital.plane,
     speed = orbital.speed,
     boost = 0,
@@ -580,11 +726,13 @@ local function addPlanet()
     x = cx,
     y = cy,
     z = 0,
+    light = 1,
     kind = "planet",
     revolutions = 0,
   }
 
   updateOrbiterPosition(planet)
+  assignRenderOrder(planet)
   table.insert(state.planets, planet)
   return true
 end
@@ -608,6 +756,7 @@ local function addMoon()
     radius = orbital.radius,
     flatten = orbital.flatten,
     depthScale = orbital.depthScale,
+    zBase = orbital.zBase or 0,
     plane = orbital.plane,
     speed = orbital.speed,
     boost = 0,
@@ -615,12 +764,14 @@ local function addMoon()
     x = cx,
     y = cy,
     z = 0,
+    light = 1,
     kind = "moon",
     revolutions = 0,
     childSatellites = {},
   }
 
   updateOrbiterPosition(moon)
+  assignRenderOrder(moon)
   table.insert(state.moons, moon)
   return true
 end
@@ -644,6 +795,7 @@ local function addSatellite()
     radius = orbital.radius,
     flatten = orbital.flatten,
     depthScale = orbital.depthScale,
+    zBase = orbital.zBase or 0,
     plane = orbital.plane,
     speed = orbital.speed,
     boost = 0,
@@ -651,11 +803,13 @@ local function addSatellite()
     x = cx,
     y = cy,
     z = 0,
+    light = 1,
     kind = "satellite",
     revolutions = 0,
   }
 
   updateOrbiterPosition(satellite)
+  assignRenderOrder(satellite)
   table.insert(state.satellites, satellite)
   return true
 end
@@ -680,6 +834,7 @@ local function addSatelliteToMoon(moon)
     radius = orbital.radius,
     flatten = orbital.flatten,
     depthScale = orbital.depthScale,
+    zBase = orbital.zBase or 0,
     plane = orbital.plane,
     speed = orbital.speed,
     boost = 0,
@@ -687,7 +842,9 @@ local function addSatelliteToMoon(moon)
     x = moon.x,
     y = moon.y,
     z = 0,
+    light = 1,
     kind = "moon-satellite",
+    parentMoon = moon,
     revolutions = 0,
   }
   local cp = math.cos(child.plane)
@@ -696,7 +853,9 @@ local function addSatelliteToMoon(moon)
   local oy = math.sin(child.angle) * child.radius * child.flatten
   child.x = moon.x + ox * cp - oy * sp
   child.y = moon.y + ox * sp + oy * cp
-  child.z = moon.z + math.sin(child.angle) * (child.depthScale or 1)
+  child.z = moon.z + (child.zBase or 0) + math.sin(child.angle) * (child.depthScale or 1)
+  updateOrbiterLight(child)
+  assignRenderOrder(child)
   table.insert(moon.childSatellites, child)
   return true
 end
@@ -710,7 +869,8 @@ updateOrbiterPosition = function(orbiter)
 
   orbiter.x = cx + ox * cp - oy * sp
   orbiter.y = cy + ox * sp + oy * cp
-  orbiter.z = math.sin(orbiter.angle) * (orbiter.depthScale or 1)
+  orbiter.z = (orbiter.zBase or 0) + math.sin(orbiter.angle) * (orbiter.depthScale or 1)
+  updateOrbiterLight(orbiter)
 end
 
 local function updateOrbiterBoost(orbiter, dt)
@@ -866,11 +1026,6 @@ local function onPlanetClicked()
   end
 end
 
-local function drawCircle(x, y, r, color, lightScale, alphaScale)
-  setColorScaled(color, lightScale, alphaScale)
-  love.graphics.circle("fill", x, y, r, 18)
-end
-
 local function drawBackground()
   love.graphics.clear(palette.space)
 
@@ -905,8 +1060,11 @@ local function drawSelectedOrbit(frontPass)
       if px then
         local segZ = (pz + z) * 0.5
         if (frontPass and segZ > 0) or ((not frontPass) and segZ <= 0) then
-          setColorDirect(SELECTED_ORBIT_COLOR[1], SELECTED_ORBIT_COLOR[2], SELECTED_ORBIT_COLOR[3], 0.84)
-          love.graphics.line(math.floor(px + 0.5), math.floor(py + 0.5), math.floor(x + 0.5), math.floor(y + 0.5))
+          local segLight = cameraLightAt((px + x) * 0.5, (py + y) * 0.5, segZ)
+          setLitColorDirect(SELECTED_ORBIT_COLOR[1], SELECTED_ORBIT_COLOR[2], SELECTED_ORBIT_COLOR[3], segLight, 0.84)
+          local sx0, sy0 = projectWorldPoint(px, py, pz)
+          local sx1, sy1 = projectWorldPoint(x, y, z)
+          love.graphics.line(math.floor(sx0 + 0.5), math.floor(sy0 + 0.5), math.floor(sx1 + 0.5), math.floor(sy1 + 0.5))
         end
       end
       px, py, pz = x, y, z
@@ -914,48 +1072,170 @@ local function drawSelectedOrbit(frontPass)
   end
 
   love.graphics.setLineWidth(1)
-  drawOrbitPath(orbiter, cx, cy, 0)
+  drawOrbitPath(orbiter, cx, cy, orbiter.zBase or 0)
+end
+
+local function drawSelectedLightOrbit(frontPass)
+  if not state.selectedLightSource then
+    return
+  end
+
+  local step = 0.08
+  local px, py, pz, rawZ
+  for a = 0, TWO_PI + step, step do
+    local x = cx + math.cos(a) * LIGHT_ORBIT_RADIUS_X
+    local y = cy + math.sin(a) * LIGHT_ORBIT_RADIUS_Y
+    local z = LIGHT_ORBIT_Z_BASE + math.sin(a + math.pi * 0.5) * LIGHT_ORBIT_Z_VARIATION
+    local projectedZ = lightProjectionZ(z)
+    if px then
+      local segProjZ = (pz + projectedZ) * 0.5
+      if (frontPass and segProjZ > 0) or ((not frontPass) and segProjZ <= 0) then
+        local segRawZ = (rawZ + z) * 0.5
+        local segLight = cameraLightAt((px + x) * 0.5, (py + y) * 0.5, segRawZ)
+        setLitColorDirect(SELECTED_ORBIT_COLOR[1], SELECTED_ORBIT_COLOR[2], SELECTED_ORBIT_COLOR[3], segLight, 0.58)
+        local sx0, sy0 = projectWorldPoint(px, py, pz)
+        local sx1, sy1 = projectWorldPoint(x, y, projectedZ)
+        love.graphics.line(math.floor(sx0 + 0.5), math.floor(sy0 + 0.5), math.floor(sx1 + 0.5), math.floor(sy1 + 0.5))
+      end
+    end
+    px, py, pz, rawZ = x, y, projectedZ, z
+  end
+end
+
+local function drawLitSphere(x, y, z, radius, r, g, b, lightScale, segments)
+  local px, py, projectScale = projectWorldPoint(x, y, z or 0)
+  local pr = math.max(0.6, radius * projectScale)
+  local sideCount = segments or 24
+  local lightX, lightY, lightZ = sideLightWorldPosition()
+  local lightPx, lightPy = projectWorldPoint(lightX, lightY, lightProjectionZ(lightZ))
+  local objDepth = (z or 0) * CAMERA_LIGHT_Z_SCALE
+  local lightDepth = lightDepthForZ(lightZ)
+  local lx = lightPx - px
+  local ly = -(lightPy - py)
+  local lz = (lightDepth - objDepth) / CAMERA_LIGHT_Z_SCALE
+  local len = math.sqrt(lx * lx + ly * ly + lz * lz)
+  if len < 0.0001 then
+    lx, ly, lz = 1, 0, 0
+  else
+    lx = lx / len
+    ly = ly / len
+    lz = lz / len
+  end
+
+  local light = clamp(lightScale or 1, 0.02, 1.3)
+  local occlusion = 1
+  if (z or 0) < 0 then
+    local shadowRadius = BODY_VISUAL.planetRadius + pr * 0.9
+    local dx = px - cx
+    local dy = py - cy
+    local d = math.sqrt(dx * dx + dy * dy)
+    if d < shadowRadius then
+      local t = 1 - d / shadowRadius
+      occlusion = 1 - smoothstep(t) * 0.45
+    end
+  end
+  local bodyLight = light * occlusion
+  local shadowFactor = planetShadowFactorAt(x, y, z) * occlusion
+  local inEclipse = shadowFactor <= BODY_SHADE_ECLIPSE_THRESHOLD
+
+  if inEclipse then
+    setColorDirect(palette.space[1], palette.space[2], palette.space[3], 1)
+    love.graphics.circle("fill", px, py, pr, sideCount)
+    return
+  end
+
+  if sphereShader and spherePixel then
+    local shaderLightPower = clamp(0.40 + bodyLight * 0.86, 0.30, 1.08)
+    local shaderAmbient = clamp(0.16 + bodyLight * 0.14, 0, 0.40)
+    local prevShader = love.graphics.getShader()
+    love.graphics.setShader(sphereShader)
+    sphereShader:send("baseColor", {clamp(r, 0, 1), clamp(g, 0, 1), clamp(b, 0, 1)})
+    sphereShader:send("lightVec", {lx, ly, lz})
+    sphereShader:send("lightPower", shaderLightPower)
+    sphereShader:send("ambient", shaderAmbient)
+    sphereShader:send("contrast", 1.08)
+    sphereShader:send("darkFloor", BODY_SHADE_DARK_FLOOR_TONE)
+    love.graphics.setColor(1, 1, 1, 1)
+    love.graphics.draw(spherePixel, px - pr, py - pr, 0, pr * 2, pr * 2)
+    love.graphics.setShader(prevShader)
+    return
+  end
+
+  setLitColorDirect(r, g, b, bodyLight, 1)
+  love.graphics.circle("fill", px, py, pr, sideCount)
 end
 
 local function drawPlanet()
-  local r, g, b = currentPlanetColor()
   local t = 1 - clamp(state.planetBounceTime / PLANET_BOUNCE_DURATION, 0, 1)
   local kick = math.sin(t * math.pi)
   local bounceScale = 1 + kick * 0.14 * (1 - t)
-  setColorDirect(r, g, b, 1)
-  love.graphics.push()
-  love.graphics.translate(cx, cy)
-  love.graphics.scale(bounceScale, bounceScale)
-  love.graphics.translate(-cx, -cy)
-  love.graphics.circle("fill", cx, cy, BODY_VISUAL.planetRadius, 36)
-  love.graphics.pop()
+  local px, py, projScale = projectWorldPoint(cx, cy, 0)
+  local pr = BODY_VISUAL.planetRadius * bounceScale * projScale
+  setColorDirect(0, 0, 0, 1)
+  love.graphics.circle("fill", px, py, pr, 40)
+end
+
+local function drawLightSource(frontPass)
+  local lightX, lightY, lightZ, projectedZ, px, py, projectScale = lightSourceProjected()
+  if frontPass then
+    if projectedZ <= 0 then
+      return
+    end
+  elseif projectedZ > 0 then
+    return
+  end
+
+  local baseLight = clamp(cameraLightAt(lightX, lightY, lightZ) * 1.08, 0.45, 1.25)
+  local coreR = math.max(2, LIGHT_SOURCE_MARKER_RADIUS * projectScale)
+  local haloR = coreR * 1.9
+
+  setLitColorDirect(swatch.bright[1], swatch.bright[2], swatch.bright[3], baseLight, 0.42)
+  love.graphics.circle("fill", px, py, haloR, 32)
+  setLitColorDirect(swatch.brightest[1], swatch.brightest[2], swatch.brightest[3], baseLight, 0.95)
+  love.graphics.circle("fill", px, py, coreR, 24)
+
+  if state.selectedLightSource then
+    local pulse = 0.5 + 0.5 * math.sin(state.time * 3.2)
+    local ringR = lightSourceHitRadius(projectScale) + pulse * (2.8 * projectScale)
+    setLitColorDirect(
+      SELECTED_ORBIT_COLOR[1],
+      SELECTED_ORBIT_COLOR[2],
+      SELECTED_ORBIT_COLOR[3],
+      clamp(baseLight * 1.04, 0.4, 1.25),
+      0.92
+    )
+    love.graphics.setLineWidth(1)
+    love.graphics.circle("line", px, py, ringR, 36)
+  end
 end
 
 local function drawSpeedWaveRipples()
   local ripples = state.speedWaveRipples
+  local planetLight = cameraLightAt(cx, cy, 0)
   for i = 1, #ripples do
     local ripple = ripples[i]
     local t = clamp(ripple.age / ripple.life, 0, 1)
     local radius = BODY_VISUAL.planetRadius + t * SPEED_WAVE_RIPPLE_MAX_RADIUS
     local alpha = (1 - smoothstep(t)) * 0.9
     local brightness = 1 - t
-    setColorBlendScaled(swatch.brightest, swatch.dim, 1 - brightness, 1, alpha)
+    setColorBlendScaled(swatch.brightest, swatch.dim, 1 - brightness, planetLight, alpha)
     love.graphics.setLineWidth(2 - t * 0.8)
     love.graphics.circle("line", cx, cy, radius, 64)
   end
   love.graphics.setLineWidth(1)
 end
 
-local function drawOrbitalTrail(orbiter, trailLen, headAlpha, tailAlpha, originX, originY)
+local function drawOrbitalTrail(orbiter, trailLen, headAlpha, tailAlpha, originX, originY, originZ, lightScale)
   local radius = math.max(orbiter.radius, 1)
   local arcAngle = trailLen / radius
   local stepCount = math.max(4, math.ceil(arcAngle / 0.06))
   local stepAngle = arcAngle / stepCount
   local cp = math.cos(orbiter.plane)
   local sp = math.sin(orbiter.plane)
-  local prevX, prevY
+  local prevX, prevY, prevZ
   local centerX = originX or cx
   local centerY = originY or cy
+  local centerZ = originZ or 0
 
   for i = 0, stepCount do
     local a = orbiter.angle - stepAngle * i
@@ -963,15 +1243,20 @@ local function drawOrbitalTrail(orbiter, trailLen, headAlpha, tailAlpha, originX
     local oy = math.sin(a) * orbiter.radius * orbiter.flatten
     local x = centerX + ox * cp - oy * sp
     local y = centerY + ox * sp + oy * cp
+    local z = centerZ + (orbiter.zBase or 0) + math.sin(a) * (orbiter.depthScale or 1)
     if prevX then
       local t = i / stepCount
       local alpha = lerp(headAlpha or 0.35, tailAlpha or 0.02, t)
       local midAngle = a + stepAngle * 0.5
       local r, g, b = computeOrbiterColor(midAngle)
-      setColorDirect(r, g, b, alpha)
-      love.graphics.line(prevX, prevY, x, y)
+      local trailZ = (prevZ + z) * 0.5
+      local trailLight = lightScale or cameraLightAt((prevX + x) * 0.5, (prevY + y) * 0.5, trailZ)
+      setLitColorDirect(r, g, b, trailLight, alpha)
+      local sx0, sy0 = projectWorldPoint(prevX, prevY, prevZ)
+      local sx1, sy1 = projectWorldPoint(x, y, z)
+      love.graphics.line(sx0, sy0, sx1, sy1)
     end
-    prevX, prevY = x, y
+    prevX, prevY, prevZ = x, y, z
   end
 end
 
@@ -996,12 +1281,15 @@ local function drawMoon(moon)
       local oy = math.sin(a) * child.radius * child.flatten
       local x = moon.x + ox * cp - oy * sp
       local y = moon.y + ox * sp + oy * cp
-      local z = moon.z + math.sin(a) * (child.depthScale or 1)
+      local z = moon.z + (child.zBase or 0) + math.sin(a) * (child.depthScale or 1)
       if px then
         local segZ = (pz + z) * 0.5
         if (frontPass and segZ > moon.z) or ((not frontPass) and segZ <= moon.z) then
-          setColorDirect(pr, pg, pb, 0.52)
-          love.graphics.line(math.floor(px + 0.5), math.floor(py + 0.5), math.floor(x + 0.5), math.floor(y + 0.5))
+          local segLight = cameraLightAt((px + x) * 0.5, (py + y) * 0.5, segZ)
+          setLitColorDirect(pr, pg, pb, segLight, 0.52)
+          local sx0, sy0 = projectWorldPoint(px, py, pz)
+          local sx1, sy1 = projectWorldPoint(x, y, z)
+          love.graphics.line(math.floor(sx0 + 0.5), math.floor(sy0 + 0.5), math.floor(sx1 + 0.5), math.floor(sy1 + 0.5))
         end
       end
       px, py, pz = x, y, z
@@ -1010,7 +1298,7 @@ local function drawMoon(moon)
 
   if hasActiveBoost(moon) then
     local baseTrailLen = math.min(moon.radius * 2.2, 20 + moon.boost * 28)
-    drawOrbitalTrail(moon, baseTrailLen, 0.48, 0.03)
+    drawOrbitalTrail(moon, baseTrailLen, 0.48, 0.03, nil, nil, 0, moon.light)
   end
 
   local childSatellites = moon.childSatellites or {}
@@ -1022,67 +1310,133 @@ local function drawMoon(moon)
     end
   end
 
-  local function drawChild(child)
-    if hasActiveBoost(child) then
-      local baseTrailLen = math.min(child.radius * 2.2, 16 + child.boost * 22)
-      drawOrbitalTrail(child, baseTrailLen, 0.44, 0.02, moon.x, moon.y)
-    end
-    local childR, childG, childB = computeOrbiterColor(child.angle)
-    setColorDirect(childR, childG, childB, 1)
-    love.graphics.circle("fill", child.x, child.y, BODY_VISUAL.moonChildSatelliteRadius, 12)
-  end
-
-  for _, child in ipairs(childSatellites) do
-    if child.z <= moon.z then
-      drawChild(child)
-    end
-  end
-
   local moonR, moonG, moonB = computeOrbiterColor(moon.angle)
-  setColorDirect(moonR, moonG, moonB, 1)
-  love.graphics.circle("fill", moon.x, moon.y, BODY_VISUAL.moonRadius, 18)
+  drawLitSphere(moon.x, moon.y, moon.z, BODY_VISUAL.moonRadius, moonR, moonG, moonB, moon.light, 20)
 
   if showChildOrbitPaths then
     for _, child in ipairs(childSatellites) do
       drawChildOrbitPath(child, true)
     end
   end
+end
 
-  for _, child in ipairs(childSatellites) do
-    if child.z > moon.z then
-      drawChild(child)
-    end
+local function drawMoonChildSatellite(child)
+  local parentMoon = child.parentMoon
+  if hasActiveBoost(child) then
+    local baseTrailLen = math.min(child.radius * 2.2, 16 + child.boost * 22)
+    local originX = parentMoon and parentMoon.x or cx
+    local originY = parentMoon and parentMoon.y or cy
+    local originZ = parentMoon and parentMoon.z or 0
+    drawOrbitalTrail(child, baseTrailLen, 0.44, 0.02, originX, originY, originZ, child.light)
   end
+  local childR, childG, childB = computeOrbiterColor(child.angle)
+  drawLitSphere(child.x, child.y, child.z, BODY_VISUAL.moonChildSatelliteRadius, childR, childG, childB, child.light, 12)
 end
 
 local function drawOrbitPlanet(planet)
   if hasActiveBoost(planet) then
     local baseTrailLen = math.min(planet.radius * 2.2, 28 + planet.boost * 36)
-    drawOrbitalTrail(planet, baseTrailLen, 0.5, 0.04)
+    drawOrbitalTrail(planet, baseTrailLen, 0.5, 0.04, nil, nil, 0, planet.light)
   end
   local pr, pg, pb = computeOrbiterColor(planet.angle)
-  setColorDirect(pr, pg, pb, 1)
-  love.graphics.circle("fill", planet.x, planet.y, BODY_VISUAL.orbitPlanetRadius, 22)
+  drawLitSphere(planet.x, planet.y, planet.z, BODY_VISUAL.orbitPlanetRadius, pr, pg, pb, planet.light, 24)
 end
 
 local function drawMegaPlanet(megaPlanet)
   if hasActiveBoost(megaPlanet) then
     local baseTrailLen = math.min(megaPlanet.radius * 2.2, 36 + megaPlanet.boost * 44)
-    drawOrbitalTrail(megaPlanet, baseTrailLen, 0.56, 0.05)
+    drawOrbitalTrail(megaPlanet, baseTrailLen, 0.56, 0.05, nil, nil, 0, megaPlanet.light)
   end
   local pr, pg, pb = computeOrbiterColor(megaPlanet.angle)
-  setColorDirect(pr, pg, pb, 1)
-  love.graphics.circle("fill", megaPlanet.x, megaPlanet.y, BODY_VISUAL.megaPlanetRadius, 30)
+  drawLitSphere(megaPlanet.x, megaPlanet.y, megaPlanet.z, BODY_VISUAL.megaPlanetRadius, pr, pg, pb, megaPlanet.light, 36)
 end
 
 local function drawSatellite(satellite)
   if hasActiveBoost(satellite) then
     local baseTrailLen = math.min(satellite.radius * 2.2, 16 + satellite.boost * 22)
-    drawOrbitalTrail(satellite, baseTrailLen, 0.44, 0.02)
+    drawOrbitalTrail(satellite, baseTrailLen, 0.44, 0.02, nil, nil, 0, satellite.light)
   end
   local satR, satG, satB = computeOrbiterColor(satellite.angle)
-  setColorDirect(satR, satG, satB, 1)
-  love.graphics.circle("fill", satellite.x, satellite.y, BODY_VISUAL.satelliteRadius, 18)
+  drawLitSphere(satellite.x, satellite.y, satellite.z, BODY_VISUAL.satelliteRadius, satR, satG, satB, satellite.light, 18)
+end
+
+local function orbiterHitRadius(orbiter)
+  local baseRadius
+  local margin
+  if orbiter.kind == "moon" then
+    baseRadius = BODY_VISUAL.moonRadius
+    margin = 2
+  elseif orbiter.kind == "mega-planet" then
+    baseRadius = BODY_VISUAL.megaPlanetRadius
+    margin = 2
+  elseif orbiter.kind == "planet" then
+    baseRadius = BODY_VISUAL.orbitPlanetRadius
+    margin = 2
+  elseif orbiter.kind == "satellite" then
+    baseRadius = BODY_VISUAL.satelliteRadius
+    margin = 1.5
+  else
+    return nil
+  end
+  local projectScale = perspectiveScaleForZ(orbiter.z)
+  return (baseRadius + margin) * projectScale
+end
+
+local function depthSortOrbiters(a, b)
+  local az = (a.z or 0) + (a.depthBias or 0)
+  local bz = (b.z or 0) + (b.depthBias or 0)
+  local dz = az - bz
+  if math.abs(dz) > 0.00001 then
+    return dz < 0
+  end
+  return (a.renderOrder or 0) < (b.renderOrder or 0)
+end
+
+local function collectRenderOrbiters()
+  local renderOrbiters = state.renderOrbiters
+  for i = #renderOrbiters, 1, -1 do
+    renderOrbiters[i] = nil
+  end
+
+  local n = 0
+  local function append(orbiter)
+    n = n + 1
+    renderOrbiters[n] = orbiter
+  end
+
+  for _, megaPlanet in ipairs(state.megaPlanets) do
+    append(megaPlanet)
+  end
+  for _, planet in ipairs(state.planets) do
+    append(planet)
+  end
+  for _, moon in ipairs(state.moons) do
+    append(moon)
+    local childSatellites = moon.childSatellites or {}
+    for _, child in ipairs(childSatellites) do
+      append(child)
+    end
+  end
+  for _, satellite in ipairs(state.satellites) do
+    append(satellite)
+  end
+
+  table.sort(renderOrbiters, depthSortOrbiters)
+  return renderOrbiters
+end
+
+local function drawOrbiterByKind(orbiter)
+  if orbiter.kind == "moon" then
+    drawMoon(orbiter)
+  elseif orbiter.kind == "moon-satellite" then
+    drawMoonChildSatellite(orbiter)
+  elseif orbiter.kind == "mega-planet" then
+    drawMegaPlanet(orbiter)
+  elseif orbiter.kind == "planet" then
+    drawOrbitPlanet(orbiter)
+  elseif orbiter.kind == "satellite" then
+    drawSatellite(orbiter)
+  end
 end
 
 local function drawHud()
@@ -1318,11 +1672,7 @@ local function drawHud()
   local helpY1 = math.floor(viewportBottom - lineH * 2 - 8 * uiScale)
   local helpY2 = math.floor(viewportBottom - lineH - 4 * uiScale)
   local helpX = panelX
-  if zoom > 1.005 then
-    drawText(string.format("zoom %.1fx  scroll to zoom", zoom), helpX, helpY1)
-  else
-    drawText("scroll to zoom", helpX, helpY1)
-  end
+  drawText(string.format("zoom %.2fx  scroll to zoom", zoom), helpX, helpY1)
   drawText("b fullscreen", helpX, helpY2)
 end
 
@@ -1412,8 +1762,10 @@ local function drawOrbiterTooltipConnector(frontPass)
     return
   end
 
-  setColorDirect(SELECTED_ORBIT_COLOR[1], SELECTED_ORBIT_COLOR[2], SELECTED_ORBIT_COLOR[3], 0.88)
-  love.graphics.line(layout.anchorWorldX, layout.anchorWorldY, orbiter.x, orbiter.y)
+  local connectorLight = orbiter.light or cameraLightAt(orbiter.x, orbiter.y, orbiter.z)
+  setLitColorDirect(SELECTED_ORBIT_COLOR[1], SELECTED_ORBIT_COLOR[2], SELECTED_ORBIT_COLOR[3], connectorLight, 0.88)
+  local px, py = projectWorldPoint(orbiter.x, orbiter.y, orbiter.z)
+  love.graphics.line(layout.anchorWorldX, layout.anchorWorldY, px, py)
 end
 
 local function drawOrbiterTooltip()
@@ -1483,6 +1835,88 @@ local function drawSpeedWaveText()
   local yLift = t * 12 * uiScale
   setColorDirect(swatch.brightest[1], swatch.brightest[2], swatch.brightest[3], alpha)
   drawText("speed wave", popup.x + 8 * uiScale, popup.y - 10 * uiScale - yLift)
+end
+
+local function initSphereShader()
+  local pixelData = love.image.newImageData(1, 1)
+  pixelData:setPixel(0, 0, 1, 1, 1, 1)
+  spherePixel = love.graphics.newImage(pixelData)
+  spherePixel:setFilter("nearest", "nearest")
+
+  local ok, shaderOrErr = pcall(love.graphics.newShader, [[
+    extern vec3 baseColor;
+    extern vec3 lightVec;
+    extern float lightPower;
+    extern float ambient;
+    extern float contrast;
+    extern float darkFloor;
+    extern vec3 pal0;
+    extern vec3 pal1;
+    extern vec3 pal2;
+    extern vec3 pal3;
+    extern vec3 pal4;
+    extern vec3 pal5;
+    extern vec3 pal6;
+
+    vec3 paletteRamp(float t) {
+      t = clamp(t, 0.0, 1.0);
+      float s = t * 6.0;
+      if (s < 1.0) {
+        return mix(pal0, pal1, s);
+      } else if (s < 2.0) {
+        return mix(pal1, pal2, s - 1.0);
+      } else if (s < 3.0) {
+        return mix(pal2, pal3, s - 2.0);
+      } else if (s < 4.0) {
+        return mix(pal3, pal4, s - 3.0);
+      } else if (s < 5.0) {
+        return mix(pal4, pal5, s - 4.0);
+      }
+      return mix(pal5, pal6, s - 5.0);
+    }
+
+    vec4 effect(vec4 color, Image texture, vec2 texture_coords, vec2 screen_coords) {
+      vec2 p = texture_coords * 2.0 - 1.0;
+      float r2 = dot(p, p);
+      if (r2 > 1.0) {
+        return vec4(0.0);
+      }
+
+      float nz = sqrt(max(0.0, 1.0 - r2));
+      vec3 n = normalize(vec3(p.x, -p.y, nz));
+      vec3 l = normalize(lightVec);
+      float ndotl = dot(n, l);
+      float wrap = 0.72;
+      float diffuse = clamp((ndotl + wrap) / (1.0 + wrap), 0.0, 1.0);
+      diffuse = smoothstep(0.02, 0.98, diffuse);
+      float curvature = smoothstep(0.0, 1.0, nz);
+      float sphereMix = 0.35 + curvature * 0.65;
+      float lit = diffuse * sphereMix;
+      float shade = clamp(ambient + lightPower * (lit * 0.82 + curvature * 0.18), 0.0, 1.0);
+
+      float baseL = dot(baseColor, vec3(0.299, 0.587, 0.114));
+      float tone = clamp((shade - 0.5) * contrast + 0.5, 0.0, 1.0);
+      tone = max(tone, darkFloor);
+      tone = clamp(tone + (baseL - 0.5) * 0.16, 0.0, 1.0);
+
+      vec3 palColor = paletteRamp(tone);
+      return vec4(palColor, 1.0) * color;
+    }
+  ]])
+
+  if not ok then
+    sphereShader = nil
+    return
+  end
+
+  sphereShader = shaderOrErr
+  sphereShader:send("pal0", {swatch.darkest[1], swatch.darkest[2], swatch.darkest[3]})
+  sphereShader:send("pal1", {swatch.nearDark[1], swatch.nearDark[2], swatch.nearDark[3]})
+  sphereShader:send("pal2", {swatch.dimmest[1], swatch.dimmest[2], swatch.dimmest[3]})
+  sphereShader:send("pal3", {swatch.dim[1], swatch.dim[2], swatch.dim[3]})
+  sphereShader:send("pal4", {swatch.mid[1], swatch.mid[2], swatch.mid[3]})
+  sphereShader:send("pal5", {swatch.bright[1], swatch.bright[2], swatch.bright[3]})
+  sphereShader:send("pal6", {swatch.brightest[1], swatch.brightest[2], swatch.brightest[3]})
 end
 
 local function initBackgroundMusic()
@@ -1611,6 +2045,7 @@ function love.load()
 
   canvas = love.graphics.newCanvas(GAME_W, GAME_H)
   canvas:setFilter("nearest", "nearest")
+  initSphereShader()
   initBackgroundMusic()
   initUpgradeFx()
   initClickFx()
@@ -1639,7 +2074,7 @@ function love.keypressed(key)
 end
 
 function love.wheelmoved(_, wy)
-  zoom = clamp(zoom + wy * 0.1, 1, 2)
+  zoom = clamp(zoom + wy * 0.1, ZOOM_MIN, ZOOM_MAX)
 end
 
 function love.update(dt)
@@ -1700,7 +2135,9 @@ function love.update(dt)
       local sy = moon.y + ox * sp + oy * cp
       child.x = sx
       child.y = sy
-      child.z = moon.z + math.sin(child.angle) * (child.depthScale or 1)
+      child.z = moon.z + (child.zBase or 0) + math.sin(child.angle) * (child.depthScale or 1)
+      child.parentMoon = moon
+      updateOrbiterLight(child)
 
       local prevTurns = math.floor(prev / TWO_PI)
       local newTurns = math.floor(child.angle / TWO_PI)
@@ -1836,66 +2273,43 @@ function love.mousepressed(x, y, button)
     return
   end
 
-  for i = #state.moons, 1, -1 do
-    local moon = state.moons[i]
-    local dx = wx - moon.x
-    local dy = wy - moon.y
-    local moonHitR = BODY_VISUAL.moonRadius + 2
-    if dx * dx + dy * dy <= moonHitR * moonHitR then
-      if state.selectedOrbiter ~= moon then
-        playClickFx(false)
+  local _, _, _, _, lightPx, lightPy, lightProjScale = lightSourceProjected()
+  local lightHitRadius = lightSourceHitRadius(lightProjScale)
+  local lightDx = wx - lightPx
+  local lightDy = wy - lightPy
+  if lightDx * lightDx + lightDy * lightDy <= lightHitRadius * lightHitRadius then
+    if (not state.selectedLightSource) or state.selectedOrbiter then
+      playClickFx(false)
+    end
+    state.selectedOrbiter = nil
+    state.selectedLightSource = true
+    return
+  end
+
+  local renderOrbiters = collectRenderOrbiters()
+  for i = #renderOrbiters, 1, -1 do
+    local orbiter = renderOrbiters[i]
+    local hitRadius = orbiterHitRadius(orbiter)
+    if hitRadius then
+      local px, py = projectWorldPoint(orbiter.x, orbiter.y, orbiter.z)
+      local dx = wx - px
+      local dy = wy - py
+      if dx * dx + dy * dy <= hitRadius * hitRadius then
+        if state.selectedOrbiter ~= orbiter then
+          playClickFx(false)
+        end
+        state.selectedOrbiter = orbiter
+        state.selectedLightSource = false
+        return
       end
-      state.selectedOrbiter = moon
-      return
     end
   end
 
-  for i = #state.megaPlanets, 1, -1 do
-    local megaPlanet = state.megaPlanets[i]
-    local dx = wx - megaPlanet.x
-    local dy = wy - megaPlanet.y
-    local megaPlanetHitR = BODY_VISUAL.megaPlanetRadius + 2
-    if dx * dx + dy * dy <= megaPlanetHitR * megaPlanetHitR then
-      if state.selectedOrbiter ~= megaPlanet then
-        playClickFx(false)
-      end
-      state.selectedOrbiter = megaPlanet
-      return
-    end
-  end
-
-  for i = #state.planets, 1, -1 do
-    local planet = state.planets[i]
-    local dx = wx - planet.x
-    local dy = wy - planet.y
-    local orbitPlanetHitR = BODY_VISUAL.orbitPlanetRadius + 2
-    if dx * dx + dy * dy <= orbitPlanetHitR * orbitPlanetHitR then
-      if state.selectedOrbiter ~= planet then
-        playClickFx(false)
-      end
-      state.selectedOrbiter = planet
-      return
-    end
-  end
-
-  for i = #state.satellites, 1, -1 do
-    local satellite = state.satellites[i]
-    local dx = wx - satellite.x
-    local dy = wy - satellite.y
-    local satelliteHitR = BODY_VISUAL.satelliteRadius + 1.5
-    if dx * dx + dy * dy <= satelliteHitR * satelliteHitR then
-      if state.selectedOrbiter ~= satellite then
-        playClickFx(false)
-      end
-      state.selectedOrbiter = satellite
-      return
-    end
-  end
-
-  if state.selectedOrbiter then
+  if state.selectedOrbiter or state.selectedLightSource then
     playClickFx(true)
   end
   state.selectedOrbiter = nil
+  state.selectedLightSource = false
 end
 
 function love.draw()
@@ -1909,84 +2323,33 @@ function love.draw()
   love.graphics.translate(-cx, -cy)
 
   drawSelectedOrbit(false)
+  drawSelectedLightOrbit(false)
   drawOrbiterTooltipConnector(false)
+  drawLightSource(false)
 
-  local back = {}
-  local front = {}
-  local megaPlanetBack = {}
-  local megaPlanetFront = {}
-  local planetBack = {}
-  local planetFront = {}
-  for _, m in ipairs(state.moons) do
-    if m.z <= 0 then
-      table.insert(back, m)
-    else
-      table.insert(front, m)
+  local renderOrbiters = collectRenderOrbiters()
+  local firstFront = #renderOrbiters + 1
+  for i = 1, #renderOrbiters do
+    local sortZ = (renderOrbiters[i].z or 0) + (renderOrbiters[i].depthBias or 0)
+    if sortZ > 0 then
+      firstFront = i
+      break
     end
   end
 
-  table.sort(back, function(a, b) return a.z < b.z end)
-  table.sort(front, function(a, b) return a.z < b.z end)
-  for _, mp in ipairs(state.megaPlanets) do
-    if mp.z <= 0 then
-      table.insert(megaPlanetBack, mp)
-    else
-      table.insert(megaPlanetFront, mp)
-    end
-  end
-  table.sort(megaPlanetBack, function(a, b) return a.z < b.z end)
-  table.sort(megaPlanetFront, function(a, b) return a.z < b.z end)
-  for _, p in ipairs(state.planets) do
-    if p.z <= 0 then
-      table.insert(planetBack, p)
-    else
-      table.insert(planetFront, p)
-    end
-  end
-  table.sort(planetBack, function(a, b) return a.z < b.z end)
-  table.sort(planetFront, function(a, b) return a.z < b.z end)
-
-  for _, mp in ipairs(megaPlanetBack) do
-    drawMegaPlanet(mp)
-  end
-  for _, p in ipairs(planetBack) do
-    drawOrbitPlanet(p)
-  end
-  for _, m in ipairs(back) do
-    drawMoon(m)
-  end
-
-  local satBack = {}
-  local satFront = {}
-  for _, s in ipairs(state.satellites) do
-    if s.z <= 0 then
-      table.insert(satBack, s)
-    else
-      table.insert(satFront, s)
-    end
-  end
-  table.sort(satBack, function(a, b) return a.z < b.z end)
-  table.sort(satFront, function(a, b) return a.z < b.z end)
-
-  for _, s in ipairs(satBack) do
-    drawSatellite(s)
+  for i = 1, firstFront - 1 do
+    drawOrbiterByKind(renderOrbiters[i])
   end
   drawPlanet()
   drawOrbiterTooltipConnector(true)
   drawSpeedWaveRipples()
   drawSelectedOrbit(true)
-  for _, s in ipairs(satFront) do
-    drawSatellite(s)
+  drawSelectedLightOrbit(true)
+
+  for i = firstFront, #renderOrbiters do
+    drawOrbiterByKind(renderOrbiters[i])
   end
-  for _, mp in ipairs(megaPlanetFront) do
-    drawMegaPlanet(mp)
-  end
-  for _, p in ipairs(planetFront) do
-    drawOrbitPlanet(p)
-  end
-  for _, m in ipairs(front) do
-    drawMoon(m)
-  end
+  drawLightSource(true)
   love.graphics.pop()
 
   drawOrbitGainFx()
