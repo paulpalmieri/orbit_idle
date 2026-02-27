@@ -111,6 +111,20 @@ local SPEED_WAVE_RIPPLE_RADIAL_STRENGTH = 0.062
 local SPEED_WAVE_RIPPLE_SWIRL_STRENGTH = 0.0018
 local SPEED_WAVE_RIPPLE_END_PADDING = 0.12
 local SPEED_WAVE_TEXT_LIFETIME = 0.6
+STABILITY = {
+  idleSeconds = 4.5,
+  drainPerSecond = 0.055,
+  clickGain = 1 / 24,
+  unstableThreshold = 0.34,
+  recoveryThreshold = 0.90,
+  recoveryBoostDuration = 6,
+  recoveryBoostMultiplier = 1.22,
+  minSpeedMultiplier = 0.62,
+  waveInterval = 1.15,
+  gaugeWidth = 320,
+  segmentCount = 24,
+  maxFxDuration = 0.55,
+}
 local ORBIT_POP_LIFETIME = 1.44
 local PLANET_COLOR_CYCLE_SECONDS = 30
 local ORBIT_ICON_CYCLE_SECONDS = 1.8
@@ -252,6 +266,11 @@ local state = {
   speedWaveTimer = 0,
   speedWaveRipples = {},
   speedWaveText = nil,
+  stability = 1,
+  stabilityIdleTimer = 0,
+  stabilityBoostTimer = 0,
+  stabilityWaveTimer = 0,
+  stabilityMaxFxTimer = 0,
   planetVisualRadius = BODY_VISUAL.planetRadius,
 }
 
@@ -263,6 +282,7 @@ local ui = {
   speedWaveBtn = {x = 0, y = 0, w = 0, h = 0},
   speedClickBtn = {x = 0, y = 0, w = 0, h = 0},
   blackHoleShaderBtn = {x = 0, y = 0, w = 0, h = 0},
+  stabilityGauge = {x = 0, y = 0, w = 0, h = 0},
   orbiterActionBtn = {x = 0, y = 0, w = 0, h = 0, visible = false, enabled = false, action = nil},
 }
 
@@ -684,6 +704,7 @@ local function setBorderlessFullscreen(enabled)
       fullscreen = true,
       fullscreentype = "desktop",
       borderless = true,
+      highdpi = true,
       resizable = true,
       vsync = 1,
       minwidth = 960,
@@ -693,6 +714,7 @@ local function setBorderlessFullscreen(enabled)
     love.window.setMode(1280, 720, {
       fullscreen = false,
       borderless = false,
+      highdpi = true,
       resizable = true,
       vsync = 1,
       minwidth = 960,
@@ -1029,6 +1051,45 @@ local function speedWaveBoostFor(orbiter)
   return 0
 end
 
+function stabilitySlowMultiplier()
+  if state.stability >= STABILITY.unstableThreshold then
+    return 1
+  end
+  local t = 1 - (state.stability / STABILITY.unstableThreshold)
+  return lerp(1, STABILITY.minSpeedMultiplier, smoothstep(t))
+end
+
+function stabilityRecoveryBoostMultiplier()
+  if state.stabilityBoostTimer <= 0 then
+    return 1
+  end
+  local t = clamp(state.stabilityBoostTimer / STABILITY.recoveryBoostDuration, 0, 1)
+  return lerp(1, STABILITY.recoveryBoostMultiplier, smoothstep(t))
+end
+
+function blackHoleStabilitySpeedMultiplier()
+  return stabilitySlowMultiplier() * stabilityRecoveryBoostMultiplier()
+end
+
+function isBlackHoleUnstable()
+  return state.stability < STABILITY.unstableThreshold
+end
+
+function onBlackHoleStabilityClick()
+  local wasStable = state.stability >= STABILITY.recoveryThreshold
+  local wasMax = state.stability >= 1
+  state.stability = clamp(state.stability + STABILITY.clickGain, 0, 1)
+  state.stabilityIdleTimer = 0
+  if (not wasStable) and state.stability >= STABILITY.recoveryThreshold then
+    state.stabilityBoostTimer = STABILITY.recoveryBoostDuration
+    spawnModifierRipple()
+  end
+  if (not wasMax) and state.stability >= 1 then
+    state.stabilityMaxFxTimer = STABILITY.maxFxDuration
+    spawnModifierRipple()
+  end
+end
+
 local function triggerSpeedWave()
   state.speedWaveTimer = SPEED_WAVE_DURATION
   spawnModifierRipple()
@@ -1116,6 +1177,7 @@ end
 
 local function onPlanetClicked()
   state.planetBounceTime = PLANET_BOUNCE_DURATION
+  onBlackHoleStabilityClick()
   if state.speedClickUnlocked then
     triggerPlanetImpulse()
   end
@@ -1612,6 +1674,105 @@ function drawHoverTooltip(lines, anchorBtn, uiScale, lineH, preferLeft)
   end
 end
 
+function drawStabilityGauge(uiScale, counterY)
+  local px = math.max(1, math.floor(uiScale + 0.5))
+  local segCount = STABILITY.segmentCount
+  local segW = 5 * px
+  local segGap = px
+  local innerH = 8 * px
+  local barsW = segCount * segW + (segCount - 1) * segGap
+  local barsH = innerH
+  local barsX = math.floor(offsetX + (GAME_W * scale - barsW) * 0.5)
+  local barsY = math.max(offsetY + 4 * px, math.floor(counterY - barsH - 9 * px))
+  local stability = clamp(state.stability, 0, 1)
+  local filledSegments = math.floor(stability * segCount + 1e-6)
+  local unstableSegment = math.max(1, math.min(segCount, math.floor(STABILITY.unstableThreshold * segCount + 0.5)))
+  local markerSegment = math.max(1, math.min(segCount, filledSegments))
+  local pulse = isBlackHoleUnstable() and (0.75 + 0.25 * (0.5 + 0.5 * math.sin(state.time * 10))) or 1
+  local maxFxActive = state.stabilityMaxFxTimer > 0 and STABILITY.maxFxDuration > 0
+  local maxFxCenter = 1
+  if maxFxActive then
+    local rawT = 1 - clamp(state.stabilityMaxFxTimer / STABILITY.maxFxDuration, 0, 1)
+    local steps = 18
+    local step = math.floor(rawT * steps + 1e-6)
+    local stepT = step / steps
+    maxFxCenter = 1 + stepT * (segCount - 1)
+  end
+
+  ui.stabilityGauge.x = barsX
+  ui.stabilityGauge.y = barsY - 4 * px
+  ui.stabilityGauge.w = barsW
+  ui.stabilityGauge.h = barsH + 8 * px
+
+  for i = 1, segCount do
+    local segX = barsX + (i - 1) * (segW + segGap)
+    if i <= filledSegments then
+      local baseColor = i <= unstableSegment and swatch.bright or swatch.brightest
+      local baseAlpha = i <= unstableSegment and (0.95 * pulse) or 0.90
+      local segY = barsY
+      if maxFxActive then
+        local dist = math.abs(i - maxFxCenter)
+        local waveLevel = 0
+        if dist <= 0.6 then
+          waveLevel = 1
+        elseif dist <= 1.4 then
+          waveLevel = 0.72
+        elseif dist <= 2.2 then
+          waveLevel = 0.46
+        elseif dist <= 3.0 then
+          waveLevel = 0.24
+        end
+        local lift = math.floor(4 * px * waveLevel + 0.5)
+        segY = barsY - lift
+        setColorBlendScaled(baseColor, swatch.brightest, waveLevel, 1, baseAlpha + waveLevel * 0.30)
+      else
+        setColorScaled(baseColor, 1, baseAlpha)
+      end
+      love.graphics.rectangle("fill", segX, segY, segW, innerH)
+      setColorScaled(swatch.darkest, 1, 0.35)
+      love.graphics.rectangle("fill", segX, segY + innerH - px, segW, px)
+    else
+      setColorScaled(swatch.nearDark, 1, 0.88)
+      love.graphics.rectangle("fill", segX, barsY, segW, innerH)
+    end
+  end
+
+  local markerX = barsX + (markerSegment - 1) * (segW + segGap) + math.floor(segW * 0.5)
+  local markerWaveLevel = 0
+  if maxFxActive then
+    local dist = math.abs(markerSegment - maxFxCenter)
+    if dist <= 0.6 then
+      markerWaveLevel = 1
+    elseif dist <= 1.4 then
+      markerWaveLevel = 0.72
+    elseif dist <= 2.2 then
+      markerWaveLevel = 0.46
+    elseif dist <= 3.0 then
+      markerWaveLevel = 0.24
+    end
+  end
+  local markerY = barsY - 4 * px - math.floor(4 * px * markerWaveLevel + 0.5)
+  local markerSize = px
+  if maxFxActive then
+    markerSize = px + math.max(1, math.floor(px * 0.75 * markerWaveLevel + 0.5))
+  end
+  if markerSegment <= unstableSegment then
+    local markerAlpha = pulse
+    if maxFxActive then
+      markerAlpha = markerAlpha + markerWaveLevel * 0.2
+    end
+    setColorScaled(swatch.bright, 1, markerAlpha)
+  else
+    local markerAlpha = pulse
+    if maxFxActive then
+      markerAlpha = markerAlpha + markerWaveLevel * 0.32
+    end
+    setColorScaled(swatch.brightest, 1, markerAlpha)
+  end
+  love.graphics.rectangle("fill", markerX - markerSize, markerY, markerSize * 2 + px, markerSize)
+  love.graphics.rectangle("fill", markerX, markerY - markerSize, markerSize, markerSize * 2 + px)
+end
+
 local function drawHud()
   local font = love.graphics.getFont()
   local lineH = math.floor(font:getHeight())
@@ -1631,21 +1792,22 @@ local function drawHud()
   drawText(counterText, counterX, counterY)
 
   local totalRpm = 0
+  local stabilitySpeedMultiplier = blackHoleStabilitySpeedMultiplier()
   for _, megaPlanet in ipairs(state.megaPlanets) do
-    totalRpm = totalRpm + megaPlanet.speed * (1 + megaPlanet.boost + speedWaveBoostFor(megaPlanet)) * RAD_PER_SECOND_TO_RPM
+    totalRpm = totalRpm + megaPlanet.speed * (1 + megaPlanet.boost + speedWaveBoostFor(megaPlanet)) * stabilitySpeedMultiplier * RAD_PER_SECOND_TO_RPM
   end
   for _, planet in ipairs(state.planets) do
-    totalRpm = totalRpm + planet.speed * (1 + planet.boost + speedWaveBoostFor(planet)) * RAD_PER_SECOND_TO_RPM
+    totalRpm = totalRpm + planet.speed * (1 + planet.boost + speedWaveBoostFor(planet)) * stabilitySpeedMultiplier * RAD_PER_SECOND_TO_RPM
   end
   for _, moon in ipairs(state.moons) do
-    totalRpm = totalRpm + moon.speed * (1 + moon.boost + speedWaveBoostFor(moon)) * RAD_PER_SECOND_TO_RPM
+    totalRpm = totalRpm + moon.speed * (1 + moon.boost + speedWaveBoostFor(moon)) * stabilitySpeedMultiplier * RAD_PER_SECOND_TO_RPM
     local childSatellites = moon.childSatellites or {}
     for _, child in ipairs(childSatellites) do
-      totalRpm = totalRpm + child.speed * (1 + child.boost + speedWaveBoostFor(child)) * RAD_PER_SECOND_TO_RPM
+      totalRpm = totalRpm + child.speed * (1 + child.boost + speedWaveBoostFor(child)) * stabilitySpeedMultiplier * RAD_PER_SECOND_TO_RPM
     end
   end
   for _, satellite in ipairs(state.satellites) do
-    totalRpm = totalRpm + satellite.speed * (1 + satellite.boost + speedWaveBoostFor(satellite)) * RAD_PER_SECOND_TO_RPM
+    totalRpm = totalRpm + satellite.speed * (1 + satellite.boost + speedWaveBoostFor(satellite)) * stabilitySpeedMultiplier * RAD_PER_SECOND_TO_RPM
   end
 
   local rpmText = string.format("%.2f rpm", totalRpm)
@@ -1843,6 +2005,7 @@ local function drawHud()
   love.graphics.setScissor()
 
   drawHoverTooltip(hoveredTooltipLines, hoveredTooltipBtn, uiScale, lineH, false)
+  drawStabilityGauge(uiScale, counterY)
 
   love.graphics.setColor(palette.muted)
   local viewportBottom = offsetY + GAME_H * scale
@@ -1894,7 +2057,9 @@ function getOrbiterTooltipLayout()
   local font = getUiScreenFont()
   local uiScale = scale >= 1 and scale or 1
   local totalBoost = orbiter.boost + speedWaveBoostFor(orbiter)
+  local stabilityMultiplier = blackHoleStabilitySpeedMultiplier()
   local boostPercent = math.floor(totalBoost * 100 + 0.5)
+  local stabilityPercent = math.floor((stabilityMultiplier - 1) * 100 + 0.5)
   local title = "selected moon"
   if orbiter.kind == "satellite" or orbiter.kind == "moon-satellite" then
     title = "selected satellite"
@@ -1905,12 +2070,13 @@ function getOrbiterTooltipLayout()
   end
 
   local baseRpm = orbiter.speed * RAD_PER_SECOND_TO_RPM
-  local currentRpm = orbiter.speed * (1 + totalBoost) * RAD_PER_SECOND_TO_RPM
+  local currentRpm = orbiter.speed * (1 + totalBoost) * stabilityMultiplier * RAD_PER_SECOND_TO_RPM
   local detailLines = {
     {pre = "revolutions ", hi = tostring(orbiter.revolutions), post = ""},
     {pre = "orbit radius ", hi = string.format("%.0f px", orbiter.radius), post = ""},
     {pre = "base speed ", hi = string.format("%.2f rpm", baseRpm), post = ""},
     {pre = "current speed ", hi = string.format("%.2f rpm", currentRpm), post = ""},
+    {pre = "stability mod ", hi = string.format("%+d%%", stabilityPercent), post = ""},
     {pre = "active boost ", hi = string.format("%+d%%", boostPercent), post = ""},
   }
 
@@ -2423,6 +2589,21 @@ function love.update(dt)
   state.time = state.time + dt
   state.planetBounceTime = math.max(0, state.planetBounceTime - dt)
   state.speedWaveTimer = math.max(0, state.speedWaveTimer - dt)
+  state.stabilityBoostTimer = math.max(0, state.stabilityBoostTimer - dt)
+  state.stabilityMaxFxTimer = math.max(0, state.stabilityMaxFxTimer - dt)
+  state.stabilityIdleTimer = state.stabilityIdleTimer + dt
+  if state.stabilityIdleTimer > STABILITY.idleSeconds then
+    state.stability = math.max(0, state.stability - STABILITY.drainPerSecond * dt)
+  end
+  if isBlackHoleUnstable() then
+    state.stabilityWaveTimer = state.stabilityWaveTimer + dt
+    while state.stabilityWaveTimer >= STABILITY.waveInterval do
+      state.stabilityWaveTimer = state.stabilityWaveTimer - STABILITY.waveInterval
+      spawnModifierRipple()
+    end
+  else
+    state.stabilityWaveTimer = 0
+  end
   updateOrbitGainFx(dt)
 
   local ripples = state.speedWaveRipples
@@ -2441,10 +2622,12 @@ function love.update(dt)
     end
   end
 
+  local stabilitySpeedMultiplier = blackHoleStabilitySpeedMultiplier()
+
   for _, megaPlanet in ipairs(state.megaPlanets) do
     local prev = megaPlanet.angle
     updateOrbiterBoost(megaPlanet, dt)
-    local effectiveSpeed = megaPlanet.speed * (1 + megaPlanet.boost)
+    local effectiveSpeed = megaPlanet.speed * (1 + megaPlanet.boost) * stabilitySpeedMultiplier
     megaPlanet.angle = megaPlanet.angle + effectiveSpeed * dt
 
     local prevTurns = math.floor(prev / TWO_PI)
@@ -2462,7 +2645,7 @@ function love.update(dt)
   for _, planet in ipairs(state.planets) do
     local prev = planet.angle
     updateOrbiterBoost(planet, dt)
-    local effectiveSpeed = planet.speed * (1 + planet.boost)
+    local effectiveSpeed = planet.speed * (1 + planet.boost) * stabilitySpeedMultiplier
     planet.angle = planet.angle + effectiveSpeed * dt
 
     local prevTurns = math.floor(prev / TWO_PI)
@@ -2480,7 +2663,7 @@ function love.update(dt)
   for _, moon in ipairs(state.moons) do
     local prev = moon.angle
     updateOrbiterBoost(moon, dt)
-    local effectiveSpeed = moon.speed * (1 + moon.boost)
+    local effectiveSpeed = moon.speed * (1 + moon.boost) * stabilitySpeedMultiplier
 
     moon.angle = moon.angle + effectiveSpeed * dt
 
@@ -2500,7 +2683,7 @@ function love.update(dt)
       local prev = child.angle
       updateOrbiterBoost(child, dt)
       local totalBoost = child.boost + speedWaveBoostFor(child)
-      local effectiveSpeed = child.speed * (1 + totalBoost)
+      local effectiveSpeed = child.speed * (1 + totalBoost) * stabilitySpeedMultiplier
       child.angle = child.angle + effectiveSpeed * dt
       child.parentOrbiter = moon
       child.parentMoon = moon
@@ -2521,7 +2704,7 @@ function love.update(dt)
     local prev = satellite.angle
     updateOrbiterBoost(satellite, dt)
     local totalBoost = satellite.boost + speedWaveBoostFor(satellite)
-    local effectiveSpeed = satellite.speed * (1 + totalBoost)
+    local effectiveSpeed = satellite.speed * (1 + totalBoost) * stabilitySpeedMultiplier
 
     satellite.angle = satellite.angle + effectiveSpeed * dt
 
