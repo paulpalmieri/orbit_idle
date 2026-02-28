@@ -192,6 +192,7 @@ function OrbiterSystem:addMoon(parentOrbiter)
   local moon = self:_addOrbiter(self.state.moons, self.orbitConfigs.moon, "moon")
   moon.parentOrbiter = parentOrbiter
   moon.childSatellites = {}
+  moon.timingAnchorAngle = moon.angle
   self.updateOrbiterPosition(moon)
   return true
 end
@@ -266,8 +267,21 @@ function OrbiterSystem:triggerPlanetImpulse()
     return false
   end
 
-  target.boostDurations = target.boostDurations or createEmptyBoostTable()
-  target.boostDurations[#target.boostDurations + 1] = self.impulseDuration
+  return self:injectBoost(target, self.impulseDuration)
+end
+
+function OrbiterSystem:injectBoost(orbiter, duration)
+  if not orbiter then
+    return false
+  end
+
+  local boostDuration = math.max(0, tonumber(duration) or 0)
+  if boostDuration <= 0 then
+    return false
+  end
+
+  orbiter.boostDurations = orbiter.boostDurations or createEmptyBoostTable()
+  orbiter.boostDurations[#orbiter.boostDurations + 1] = boostDuration
   return true
 end
 

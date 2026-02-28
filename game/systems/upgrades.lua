@@ -151,47 +151,23 @@ function UpgradeSystem:triggerSpeedWave()
 end
 
 function UpgradeSystem:isBlackHoleUnstable()
-  return self.state.stability < self.stability.unstableThreshold
+  return false
 end
 
 function UpgradeSystem:stabilitySlowMultiplier()
-  if self.state.stability >= self.stability.unstableThreshold then
-    return 1
-  end
-  local t = 1 - (self.state.stability / self.stability.unstableThreshold)
-  return lerp(1, self.stability.minSpeedMultiplier, smoothstep(t))
+  return 1
 end
 
 function UpgradeSystem:stabilityRecoveryBoostMultiplier()
-  if self.state.stabilityBoostTimer <= 0 then
-    return 1
-  end
-  local boosted = self.stability.recoveryBoostMultiplier * self.modifiers:getMul("stability_recovery_multiplier")
-  local t = clamp(self.state.stabilityBoostTimer / self.stability.recoveryBoostDuration, 0, 1)
-  return lerp(1, boosted, smoothstep(t))
+  return 1
 end
 
 function UpgradeSystem:blackHoleStabilitySpeedMultiplier()
-  return self:stabilitySlowMultiplier() * self:stabilityRecoveryBoostMultiplier()
+  return 1
 end
 
 function UpgradeSystem:onBlackHoleStabilityClick()
-  local clickGain = self.stability.clickGain * self.modifiers:getMul("stability_click_gain")
-  local wasStable = self.state.stability >= self.stability.recoveryThreshold
-  local wasMax = self.state.stability >= 1
-
-  self.state.stability = clamp(self.state.stability + clickGain, 0, 1)
-  self.state.stabilityIdleTimer = 0
-
-  if (not wasStable) and self.state.stability >= self.stability.recoveryThreshold then
-    self.state.stabilityBoostTimer = self.stability.recoveryBoostDuration
-    self:spawnModifierRipple()
-  end
-
-  if (not wasMax) and self.state.stability >= 1 then
-    self.state.stabilityMaxFxTimer = self.stability.maxFxDuration
-    self:spawnModifierRipple()
-  end
+  return
 end
 
 function UpgradeSystem:onPlanetClicked()
@@ -214,25 +190,10 @@ end
 
 function UpgradeSystem:update(dt)
   self.state.speedWaveTimer = math.max(0, self.state.speedWaveTimer - dt)
-  self.state.stabilityBoostTimer = math.max(0, self.state.stabilityBoostTimer - dt)
-  self.state.stabilityMaxFxTimer = math.max(0, self.state.stabilityMaxFxTimer - dt)
-
-  self.state.stabilityIdleTimer = self.state.stabilityIdleTimer + dt
-  if self.state.stabilityIdleTimer > self.stability.idleSeconds then
-    local drainMul = self.modifiers:getMul("stability_drain_multiplier")
-    local drain = self.stability.drainPerSecond * drainMul
-    self.state.stability = math.max(0, self.state.stability - drain * dt)
-  end
-
-  if self:isBlackHoleUnstable() then
-    self.state.stabilityWaveTimer = self.state.stabilityWaveTimer + dt
-    while self.state.stabilityWaveTimer >= self.stability.waveInterval do
-      self.state.stabilityWaveTimer = self.state.stabilityWaveTimer - self.stability.waveInterval
-      self:spawnModifierRipple()
-    end
-  else
-    self.state.stabilityWaveTimer = 0
-  end
+  self.state.stabilityBoostTimer = 0
+  self.state.stabilityMaxFxTimer = 0
+  self.state.stabilityIdleTimer = 0
+  self.state.stabilityWaveTimer = 0
 
   local ripples = self.state.speedWaveRipples
   for i = #ripples, 1, -1 do
