@@ -82,20 +82,37 @@ end
 function OrbiterSystem:updateOrbiterBoost(orbiter, dt)
   local durations = orbiter.boostDurations or createEmptyBoostTable()
   for i = #durations, 1, -1 do
-    durations[i] = durations[i] - dt
-    if durations[i] <= 0 then
+    local entry = durations[i]
+    local remaining
+    if type(entry) == "table" then
+      remaining = (tonumber(entry.duration) or 0) - dt
+      entry.duration = remaining
+      durations[i] = entry
+    else
+      remaining = (tonumber(entry) or 0) - dt
+      durations[i] = remaining
+    end
+    if remaining <= 0 then
       table.remove(durations, i)
     end
   end
   orbiter.boostDurations = durations
 
   local activeStacks = #durations
-  local targetBoost = activeStacks * self.impulseTargetBoost
-  local blendRate = activeStacks > 0 and self.impulseRiseRate or self.impulseFallRate
+  local targetBoost = 0
+  for i = 1, activeStacks do
+    local entry = durations[i]
+    if type(entry) == "table" then
+      targetBoost = targetBoost + (tonumber(entry.amount) or self.impulseTargetBoost)
+    else
+      targetBoost = targetBoost + self.impulseTargetBoost
+    end
+  end
+  local blendRate = targetBoost > 0 and self.impulseRiseRate or self.impulseFallRate
   local blend = math.min(1, dt * blendRate)
   orbiter.boost = orbiter.boost + (targetBoost - orbiter.boost) * blend
 
-  if activeStacks == 0 and orbiter.boost < 0.001 then
+  if targetBoost <= 0 and orbiter.boost < 0.001 then
     orbiter.boost = 0
   end
 end
@@ -270,7 +287,7 @@ function OrbiterSystem:triggerPlanetImpulse()
   return self:injectBoost(target, self.impulseDuration)
 end
 
-function OrbiterSystem:injectBoost(orbiter, duration)
+function OrbiterSystem:injectBoost(orbiter, duration, amount)
   if not orbiter then
     return false
   end
@@ -281,7 +298,18 @@ function OrbiterSystem:injectBoost(orbiter, duration)
   end
 
   orbiter.boostDurations = orbiter.boostDurations or createEmptyBoostTable()
-  orbiter.boostDurations[#orbiter.boostDurations + 1] = boostDuration
+  local boostAmount = tonumber(amount)
+  if boostAmount == nil then
+    orbiter.boostDurations[#orbiter.boostDurations + 1] = boostDuration
+  else
+    if boostAmount <= 0 then
+      return false
+    end
+    orbiter.boostDurations[#orbiter.boostDurations + 1] = {
+      duration = boostDuration,
+      amount = boostAmount,
+    }
+  end
   return true
 end
 

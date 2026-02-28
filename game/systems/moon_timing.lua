@@ -1,9 +1,10 @@
 local MoonTiming = {
   config = {
     windowRatio = 0.25,
-    transientBoostDuration = 1.9,
-    permanentSpeedGain = 0.08,
-    zoneRespawnDelay = 3.0,
+    transientBoostDuration = 0.75,
+    transientBoostAmount = 0.50,
+    permanentSpeedGain = 0.25,
+    zoneRespawnDelay = 1.0,
     fillDuration = 0.24,
     ghostHalfWidth = 2.8,
     ghostAlpha = 0.88,
@@ -30,9 +31,6 @@ function MoonTiming.ensureState(moon, twoPi)
   end
   if moon.timingNeedsZoneRoll == nil then
     moon.timingNeedsZoneRoll = false
-  end
-  if moon.timingLastAcceptedOrbit == nil then
-    moon.timingLastAcceptedOrbit = -math.huge
   end
 end
 
@@ -152,15 +150,10 @@ function MoonTiming.tryStartCharge(moon, twoPi)
     return false
   end
 
-  local orbit = MoonTiming.orbitIndex(moon, twoPi)
-  if moon.timingLastAcceptedOrbit == orbit then
-    return false
-  end
   if not MoonTiming.isInWindow(moon, twoPi) then
     return false
   end
 
-  moon.timingLastAcceptedOrbit = orbit
   moon.timingChargeTimer = 0.0001
   return true
 end
