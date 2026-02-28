@@ -1,11 +1,9 @@
 local MoonTiming = {
   config = {
-    windowRatio = 0.25,
-    transientBoostDuration = 0.75,
-    transientBoostAmount = 0.50,
-    permanentSpeedGain = 0.25,
-    zoneRespawnDelay = 1.0,
-    fillDuration = 0.24,
+    perfectWindow = 0.035,
+    goodWindow = 0.085,
+    zoneRespawnDelay = 0.12,
+    zoneMinSeparation = 0.10,
     ghostHalfWidth = 2.8,
     ghostAlpha = 0.88,
     dialRadius = 14,
@@ -21,13 +19,10 @@ function MoonTiming.ensureState(moon, twoPi)
     moon.timingAnchorAngle = moon.angle
   end
   if moon.timingZoneCenterAngle == nil then
-    moon.timingZoneCenterAngle = moon.timingAnchorAngle
+    moon.timingZoneCenterAngle = moon.timingAnchorAngle - math.pi * 0.5
   end
   if moon.timingCooldownTimer == nil then
     moon.timingCooldownTimer = 0
-  end
-  if moon.timingChargeTimer == nil then
-    moon.timingChargeTimer = 0
   end
   if moon.timingNeedsZoneRoll == nil then
     moon.timingNeedsZoneRoll = false
@@ -41,7 +36,7 @@ end
 local function rollZoneCenter(moon, twoPi)
   MoonTiming.ensureState(moon, twoPi)
   local previous = moon.timingZoneCenterAngle or moon.timingAnchorAngle
-  local minSeparation = twoPi * 0.12
+  local minSeparation = twoPi * MoonTiming.config.zoneMinSeparation
   local candidate = previous
   for _ = 1, 8 do
     candidate = moon.timingAnchorAngle + love.math.random() * twoPi
@@ -96,7 +91,15 @@ function MoonTiming.windowCenterAngle(moon, twoPi)
 end
 
 function MoonTiming.windowSpanAngle(twoPi)
-  return twoPi * MoonTiming.config.windowRatio
+  return MoonTiming.goodSpanAngle(twoPi)
+end
+
+function MoonTiming.goodSpanAngle(twoPi)
+  return twoPi * MoonTiming.config.goodWindow * 2
+end
+
+function MoonTiming.perfectSpanAngle(twoPi)
+  return twoPi * MoonTiming.config.perfectWindow * 2
 end
 
 function MoonTiming.isZoneVisible(moon)
@@ -107,21 +110,44 @@ function MoonTiming.isZoneVisible(moon)
 end
 
 function MoonTiming.isCharging(moon)
-  if not moon then
-    return false
-  end
-  return (moon.timingChargeTimer or 0) > 0
+  return false
 end
 
 function MoonTiming.chargeProgress(moon)
+  return 0
+end
+
+function MoonTiming.phaseDistanceNormalized(a, b)
+  local delta = math.abs(a - b)
+  if delta > 0.5 then
+    delta = 1 - delta
+  end
+  return delta
+end
+
+function MoonTiming.targetPhase(moon, twoPi)
   if not moon then
     return 0
   end
-  local timer = moon.timingChargeTimer or 0
-  if timer <= 0 then
-    return 0
+  MoonTiming.ensureState(moon, twoPi)
+  local target = (moon.timingZoneCenterAngle - moon.timingAnchorAngle) / twoPi
+  return target - math.floor(target)
+end
+
+function MoonTiming.distanceFromTargetPhase(moon, twoPi)
+  if not moon then
+    return 1
   end
-  return math.min(1, timer / MoonTiming.config.fillDuration)
+  local phase = MoonTiming.phase(moon, twoPi)
+  local target = MoonTiming.targetPhase(moon, twoPi)
+  return MoonTiming.phaseDistanceNormalized(phase, target)
+end
+
+function MoonTiming.rollTarget(moon, twoPi)
+  if not moon then
+    return
+  end
+  rollZoneCenter(moon, twoPi)
 end
 
 function MoonTiming.isInWindow(moon, twoPi)
@@ -134,28 +160,49 @@ function MoonTiming.isInWindow(moon, twoPi)
     return false
   end
 
-  local halfSpan = MoonTiming.windowSpanAngle(twoPi) * 0.5
-  local center = MoonTiming.windowCenterAngle(moon, twoPi)
-  local distanceFromCenter = math.abs(shortestAngleDistance(moon.angle, center, twoPi))
-  return distanceFromCenter <= halfSpan
+  return MoonTiming.distanceFromTargetPhase(moon, twoPi) <= MoonTiming.config.goodWindow
 end
 
-function MoonTiming.tryStartCharge(moon, twoPi)
+function MoonTiming.evaluateTap(moon, twoPi)
   if not moon then
-    return false
+    return {
+      result = "miss",
+      phaseDistance = 1,
+      goodWindow = MoonTiming.config.goodWindow,
+      perfectWindow = MoonTiming.config.perfectWindow,
+    }
   end
 
   MoonTiming.ensureState(moon, twoPi)
-  if not MoonTiming.isZoneVisible(moon) or MoonTiming.isCharging(moon) then
-    return false
+  local phaseDistance = MoonTiming.distanceFromTargetPhase(moon, twoPi)
+  local result = "miss"
+  if MoonTiming.isZoneVisible(moon) then
+    if phaseDistance <= MoonTiming.config.perfectWindow then
+      result = "perfect"
+    elseif phaseDistance <= MoonTiming.config.goodWindow then
+      result = "good"
+    end
   end
 
-  if not MoonTiming.isInWindow(moon, twoPi) then
-    return false
+  if result ~= "miss" then
+    moon.timingCooldownTimer = MoonTiming.config.zoneRespawnDelay
+    moon.timingNeedsZoneRoll = true
+    if moon.timingCooldownTimer <= 0 then
+      rollZoneCenter(moon, twoPi)
+      moon.timingNeedsZoneRoll = false
+    end
   end
 
-  moon.timingChargeTimer = 0.0001
-  return true
+  return {
+    result = result,
+    phaseDistance = phaseDistance,
+    goodWindow = MoonTiming.config.goodWindow,
+    perfectWindow = MoonTiming.config.perfectWindow,
+  }
+end
+
+function MoonTiming.tryStartCharge(moon, twoPi)
+  return MoonTiming.evaluateTap(moon, twoPi).result ~= "miss"
 end
 
 function MoonTiming.update(moon, dt, twoPi)
@@ -165,17 +212,6 @@ function MoonTiming.update(moon, dt, twoPi)
 
   MoonTiming.ensureState(moon, twoPi)
 
-  if MoonTiming.isCharging(moon) then
-    moon.timingChargeTimer = moon.timingChargeTimer + dt
-    if moon.timingChargeTimer >= MoonTiming.config.fillDuration then
-      moon.timingChargeTimer = 0
-      moon.timingCooldownTimer = MoonTiming.config.zoneRespawnDelay
-      moon.timingNeedsZoneRoll = true
-      return true
-    end
-    return false
-  end
-
   if moon.timingCooldownTimer > 0 then
     moon.timingCooldownTimer = math.max(0, moon.timingCooldownTimer - dt)
     if moon.timingCooldownTimer <= 0 and moon.timingNeedsZoneRoll then
@@ -184,7 +220,7 @@ function MoonTiming.update(moon, dt, twoPi)
     end
   end
 
-  return false
+  return true
 end
 
 return MoonTiming

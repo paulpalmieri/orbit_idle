@@ -79,6 +79,40 @@ local GAMEPLAY = {
 }
 GAMEPLAY.planetImpulseTargetBoost = GAMEPLAY.planetImpulseMultiplier - 1
 
+local SLICE = {
+  baseMoonRpm = 6.0,
+  collapseRpm = 100,
+  tempBurstDecayPerSecond = 10,
+  highRiskRpm = 70,
+  perfectWindow = 0.035,
+  goodWindow = 0.085,
+  perfectPermGain = 2.4,
+  perfectBurstGain = 9.0,
+  goodPermGain = 1.2,
+  goodBurstGain = 5.0,
+  maxResonance = 8,
+  perfectResonanceGain = 1,
+  goodResonanceGain = 0.5,
+  permGainPerResonance = 0.12,
+  burstGainPerResonance = 0.08,
+  calmRpm = 40,
+  chargedRpm = 70,
+  dangerousRpm = 90,
+  redlineRpm = 99.99,
+  collapseFreezeSeconds = 0.10,
+  rewardRpmWeight = 0.35,
+  rewardPerfectWeight = 1.5,
+  rewardHighRiskSecondsWeight = 2,
+  minimumReward = 1,
+  shardSaveFile = "collapse_shards.sav",
+  singleMoonMode = true,
+}
+
+GAMEPLAY.rpmCollapseThreshold = SLICE.collapseRpm
+GAMEPLAY.rpmInstabilityStartRatio = SLICE.dangerousRpm / SLICE.collapseRpm
+Systems.MoonTiming.config.perfectWindow = SLICE.perfectWindow
+Systems.MoonTiming.config.goodWindow = SLICE.goodWindow
+
 local ECONOMY = {
   speedWaveCost = 25,
   speedClickCost = 15,
@@ -88,8 +122,8 @@ local ECONOMY = {
   megaPlanetCost = 5000,
   satelliteCost = 5,
   moonSatelliteCost = 10,
-  maxMoons = 5,
-  maxSatellites = 20,
+  maxMoons = 1,
+  maxSatellites = 0,
 }
 
 local AUDIO = {
@@ -284,8 +318,9 @@ function createState(opts)
   if ditherEnabled == nil then
     ditherEnabled = true
   end
+  local totalShards = math.max(0, math.floor(tonumber(opts.totalShards) or 0))
   return {
-    orbits = 10000,
+    orbits = 0,
     megaPlanets = {},
     planets = {},
     moons = {},
@@ -313,10 +348,29 @@ function createState(opts)
     stabilityWaveTimer = 0,
     stabilityMaxFxTimer = 0,
     planetVisualRadius = BODY_VISUAL.planetRadius,
+    baseRpm = SLICE.baseMoonRpm,
+    permanentRpmBonus = 0,
+    tempBurstRpm = 0,
     temporaryRpm = 0,
     currentRpm = 0,
     rpmLimitTempFill = 0,
     rpmLimitFill = 0,
+    resonance = 0,
+    longestResonance = 0,
+    maxResonance = SLICE.maxResonance,
+    maxRpmReached = SLICE.baseMoonRpm,
+    perfectHits = 0,
+    goodHits = 0,
+    secondsAbove70rpm = 0,
+    shardsGainedThisRun = 0,
+    totalShards = totalShards,
+    timingPopups = {},
+    timingRings = {},
+    hitTrailTimer = 0,
+    missFlashTimer = 0,
+    redlineFlashTimer = 0,
+    collapseFreezeTimer = 0,
+    singleMoonMode = SLICE.singleMoonMode,
     collapseSequenceActive = false,
     collapseTimer = 0,
     instabilityWaveTimer = 0,
@@ -412,6 +466,30 @@ local SKILL_TREE_NODES = {
   },
 }
 
+local persistence = {
+  totalShards = 0,
+}
+
+local function loadTotalShards()
+  if not love.filesystem.getInfo(SLICE.shardSaveFile) then
+    return 0
+  end
+  local ok, content = pcall(love.filesystem.read, SLICE.shardSaveFile)
+  if not ok or type(content) ~= "string" then
+    return 0
+  end
+  local parsed = tonumber(content)
+  if not parsed then
+    return 0
+  end
+  return math.max(0, math.floor(parsed))
+end
+
+local function saveTotalShards(totalShards)
+  local value = math.max(0, math.floor(tonumber(totalShards) or 0))
+  pcall(love.filesystem.write, SLICE.shardSaveFile, tostring(value))
+end
+
 local function activeSphereShadeStyle()
   if state.sphereDitherEnabled then
     return SPHERE_SHADE_STYLE_ON
@@ -436,6 +514,24 @@ end
 
 local function lerp(a, b, t)
   return a + (b - a) * t
+end
+
+local function dangerTierForRpm(rpm)
+  local value = rpm or 0
+  if value >= SLICE.dangerousRpm then
+    return 3
+  end
+  if value >= SLICE.chargedRpm then
+    return 2
+  end
+  if value >= SLICE.calmRpm then
+    return 1
+  end
+  return 0
+end
+
+local function dangerBlendForRpm(rpm)
+  return clamp(((rpm or 0) - SLICE.calmRpm) / math.max(1, SLICE.collapseRpm - SLICE.calmRpm), 0, 1)
 end
 
 local function pointInRect(px, py, rect)
@@ -995,32 +1091,237 @@ local function speedWaveBoostFor(orbiter)
   return runtime.upgrades:getSpeedWaveBoost(orbiter)
 end
 
-function tryTimedSingleMoonBoost()
+local spawnGravityWaveRipple
+
+local TIMING_OUTCOME_STYLE = {
+  perfect = {
+    label = "Perfect",
+    color = {swatch.brightest[1], swatch.brightest[2], swatch.brightest[3]},
+    ringAlpha = 0.92,
+    trailSeconds = 0.36,
+    ringLife = 0.34,
+    ringScale = 3.2,
+  },
+  good = {
+    label = "Good",
+    color = {swatch.bright[1], swatch.bright[2], swatch.bright[3]},
+    ringAlpha = 0.72,
+    trailSeconds = 0.26,
+    ringLife = 0.28,
+    ringScale = 2.5,
+  },
+  miss = {
+    label = "Miss",
+    color = {swatch.mid[1], swatch.mid[2], swatch.mid[3]},
+    ringAlpha = 0.52,
+    trailSeconds = 0,
+    ringLife = 0.20,
+    ringScale = 1.7,
+  },
+}
+
+local function spawnTimingPopup(x, y, z, text, color, life, vy)
+  state.timingPopups[#state.timingPopups + 1] = {
+    x = x,
+    y = y,
+    z = z or 0,
+    text = text,
+    color = color,
+    age = 0,
+    life = life or 0.7,
+    vy = vy or 16,
+  }
+end
+
+local function spawnTimingRing(x, y, z, style)
+  local moonRadius = BODY_VISUAL.moonRadius
+  state.timingRings[#state.timingRings + 1] = {
+    x = x,
+    y = y,
+    z = z or 0,
+    age = 0,
+    life = style.ringLife,
+    radiusStart = moonRadius * 0.9,
+    radiusEnd = moonRadius * style.ringScale,
+    color = style.color,
+    alpha = style.ringAlpha,
+  }
+end
+
+local function playTimingHook(result)
+  if not clickFx then
+    return
+  end
+  local voice = clickFx:clone()
+  if result == "perfect" then
+    voice:setPitch(1.14)
+    voice:setVolume(0.56)
+  elseif result == "good" then
+    voice:setPitch(1.02)
+    voice:setVolume(0.50)
+  else
+    voice:setPitch(0.72)
+    voice:setVolume(0.42)
+  end
+  love.audio.play(voice)
+end
+
+local function updateTimingFeedback(dt)
+  for i = #state.timingPopups, 1, -1 do
+    local popup = state.timingPopups[i]
+    popup.age = popup.age + dt
+    if popup.age >= popup.life then
+      table.remove(state.timingPopups, i)
+    else
+      popup.y = popup.y - popup.vy * dt
+      popup.vy = popup.vy + 34 * dt
+    end
+  end
+
+  for i = #state.timingRings, 1, -1 do
+    local ring = state.timingRings[i]
+    ring.age = ring.age + dt
+    if ring.age >= ring.life then
+      table.remove(state.timingRings, i)
+    end
+  end
+
+  state.hitTrailTimer = math.max(0, (state.hitTrailTimer or 0) - dt)
+  state.missFlashTimer = math.max(0, (state.missFlashTimer or 0) - dt)
+  state.redlineFlashTimer = math.max(0, (state.redlineFlashTimer or 0) - dt)
+end
+
+local function resonanceMultiplier(scalePerPoint)
+  local resonance = clamp(state.resonance or 0, 0, state.maxResonance or SLICE.maxResonance)
+  return 1 + resonance * scalePerPoint
+end
+
+local function ensureSingleMoonExists()
   local moon = Systems.MoonTiming.getSingleMoon(state, WORLD.twoPi)
-  if not moon then
+  if moon then
+    return moon
+  end
+  if runtime.orbiters and #state.moons == 0 then
+    runtime.orbiters:addMoon(nil)
+  end
+  moon = Systems.MoonTiming.getSingleMoon(state, WORLD.twoPi)
+  if moon then
+    moon.speed = (state.baseRpm or SLICE.baseMoonRpm) / WORLD.radPerSecondToRpm
+    moon.boost = 0
+    moon.boostDurations = {}
+  end
+  return moon
+end
+
+local function applyTimingOutcome(moon, outcome)
+  if not moon or not outcome then
     return false
   end
-  return Systems.MoonTiming.tryStartCharge(moon, WORLD.twoPi)
+
+  local result = outcome.result or "miss"
+  local style = TIMING_OUTCOME_STYLE[result] or TIMING_OUTCOME_STYLE.miss
+  local popupX = moon.x
+  local popupY = moon.y - BODY_VISUAL.moonRadius * 1.3
+  local popupZ = moon.z or 0
+  spawnTimingRing(moon.x, moon.y, moon.z or 0, style)
+  playTimingHook(result)
+
+  if result == "perfect" or result == "good" then
+    if result == "perfect" then
+      state.resonance = clamp((state.resonance or 0) + SLICE.perfectResonanceGain, 0, state.maxResonance)
+      state.perfectHits = (state.perfectHits or 0) + 1
+    else
+      state.resonance = clamp((state.resonance or 0) + SLICE.goodResonanceGain, 0, state.maxResonance)
+      state.goodHits = (state.goodHits or 0) + 1
+    end
+    state.longestResonance = math.max(state.longestResonance or 0, state.resonance or 0)
+
+    local basePerm = result == "perfect" and SLICE.perfectPermGain or SLICE.goodPermGain
+    local baseBurst = result == "perfect" and SLICE.perfectBurstGain or SLICE.goodBurstGain
+    local permGain = basePerm * resonanceMultiplier(SLICE.permGainPerResonance)
+    local burstGain = baseBurst * resonanceMultiplier(SLICE.burstGainPerResonance)
+    state.permanentRpmBonus = (state.permanentRpmBonus or 0) + permGain
+    state.tempBurstRpm = (state.tempBurstRpm or 0) + burstGain
+    state.hitTrailTimer = math.max(state.hitTrailTimer or 0, style.trailSeconds)
+
+    if result == "perfect" then
+      spawnGravityWaveRipple({
+        life = 0.34,
+        widthStart = 0.024,
+        widthEnd = 0.070,
+        radialStrength = 0.067,
+        swirlStrength = 0.0021,
+        endPadding = GAMEPLAY.speedWaveRippleEndPadding,
+        startRadiusScale = 1.02,
+      })
+    elseif dangerTierForRpm(state.currentRpm or 0) >= 2 then
+      spawnGravityWaveRipple({
+        life = 0.24,
+        widthStart = 0.020,
+        widthEnd = 0.056,
+        radialStrength = 0.036,
+        swirlStrength = 0.0014,
+        endPadding = GAMEPLAY.speedWaveRippleEndPadding,
+        startRadiusScale = 1.02,
+      })
+    end
+
+    spawnTimingPopup(
+      popupX,
+      popupY,
+      popupZ,
+      string.format("%s +%.1f", style.label, basePerm),
+      style.color,
+      result == "perfect" and 0.86 or 0.76,
+      result == "perfect" and 21 or 18
+    )
+    return true
+  end
+
+  local hadResonance = (state.resonance or 0) > 0
+  state.resonance = 0
+  state.missFlashTimer = 0.13
+  spawnTimingPopup(popupX, popupY, popupZ, style.label, style.color, 0.55, 14)
+  if hadResonance then
+    spawnTimingPopup(popupX, popupY + 8, popupZ, "Resonance Break", style.color, 0.48, 11)
+  end
+  return false
+end
+
+local function syncSingleMoonSpeed()
+  local moon = ensureSingleMoonExists()
+  if not moon then
+    return nil
+  end
+  local totalRpm = (state.baseRpm or SLICE.baseMoonRpm) + (state.permanentRpmBonus or 0) + (state.tempBurstRpm or 0)
+  moon.speed = math.max(0, totalRpm) / WORLD.radPerSecondToRpm
+  moon.boost = 0
+  moon.boostDurations = {}
+  return moon
+end
+
+function tryTimedSingleMoonBoost()
+  local moon = ensureSingleMoonExists()
+  if not moon then
+    return false, "miss"
+  end
+  local outcome = Systems.MoonTiming.evaluateTap(moon, WORLD.twoPi)
+  local success = applyTimingOutcome(moon, outcome)
+  state.temporaryRpm, state.currentRpm = computeRpmBreakdown()
+  state.maxRpmReached = math.max(state.maxRpmReached or 0, state.currentRpm or 0)
+  if (state.currentRpm or 0) >= GAMEPLAY.rpmCollapseThreshold then
+    triggerRpmCollapse()
+  end
+  return success, outcome.result or "miss"
 end
 
 function updateSingleMoonTiming(dt)
-  local moon = Systems.MoonTiming.getSingleMoon(state, WORLD.twoPi)
-  if not moon then
-    return
+  local moon = ensureSingleMoonExists()
+  if moon then
+    Systems.MoonTiming.update(moon, dt, WORLD.twoPi)
   end
-
-  if not Systems.MoonTiming.update(moon, dt, WORLD.twoPi) then
-    return
-  end
-
-  moon.speed = moon.speed * (1 + Systems.MoonTiming.config.permanentSpeedGain)
-  if runtime.orbiters then
-    runtime.orbiters:injectBoost(
-      moon,
-      Systems.MoonTiming.config.transientBoostDuration,
-      Systems.MoonTiming.config.transientBoostAmount
-    )
-  end
+  state.tempBurstRpm = math.max(0, (state.tempBurstRpm or 0) - SLICE.tempBurstDecayPerSecond * dt)
+  updateTimingFeedback(dt)
 end
 
 function orbiterCurrentRpm(orbiter)
@@ -1031,51 +1332,11 @@ function orbiterCurrentRpm(orbiter)
   return orbiter.speed * (1 + totalBoost) * WORLD.radPerSecondToRpm
 end
 
-local function orbiterBaseRpm(orbiter)
-  if not orbiter then
-    return 0
-  end
-  return orbiter.speed * WORLD.radPerSecondToRpm
-end
-
-local function orbiterTemporaryRpm(orbiter)
-  if not orbiter then
-    return 0
-  end
-  local totalBoost = orbiter.boost + speedWaveBoostFor(orbiter)
-  if totalBoost <= 0 then
-    return 0
-  end
-  return orbiterBaseRpm(orbiter) * totalBoost
-end
-
 function computeRpmBreakdown()
-  local temporaryRpm = 0
-  local totalRpm = 0
-
-  local function addOrbiter(orbiter)
-    temporaryRpm = temporaryRpm + orbiterTemporaryRpm(orbiter)
-    totalRpm = totalRpm + orbiterCurrentRpm(orbiter)
-  end
-
-  for _, megaPlanet in ipairs(state.megaPlanets) do
-    addOrbiter(megaPlanet)
-  end
-  for _, planet in ipairs(state.planets) do
-    addOrbiter(planet)
-  end
-  for _, moon in ipairs(state.moons) do
-    addOrbiter(moon)
-    local childSatellites = moon.childSatellites or {}
-    for _, child in ipairs(childSatellites) do
-      addOrbiter(child)
-    end
-  end
-  for _, satellite in ipairs(state.satellites) do
-    addOrbiter(satellite)
-  end
-
-  return temporaryRpm, totalRpm
+  local baseRpm = state.baseRpm or SLICE.baseMoonRpm
+  local permanent = state.permanentRpmBonus or 0
+  local burst = state.tempBurstRpm or 0
+  return burst, math.max(0, baseRpm + permanent + burst)
 end
 
 local function smoothRpmBarFill(current, target, dt)
@@ -1093,7 +1354,7 @@ function updateRpmLimitFill(dt)
   state.rpmLimitTempFill = clamp(smoothRpmBarFill(clamp(state.rpmLimitTempFill or 0, 0, 1), temporaryTarget, dt), 0, 1)
 end
 
-local function spawnGravityWaveRipple(config)
+spawnGravityWaveRipple = function(config)
   config = config or {}
   state.speedWaveRipples[#state.speedWaveRipples + 1] = {
     age = 0,
@@ -1159,7 +1420,9 @@ function triggerRpmCollapse()
     return
   end
   state.collapseSequenceActive = true
-  state.collapseTimer = GAMEPLAY.rpmCollapseEndDelay
+  state.collapseTimer = SLICE.collapseFreezeSeconds
+  state.collapseFreezeTimer = SLICE.collapseFreezeSeconds
+  state.redlineFlashTimer = 0.24
   state.rpmLimitTempFill = clamp((state.temporaryRpm or 0) / GAMEPLAY.rpmCollapseThreshold, 0, 1)
   state.rpmLimitFill = 1
   state.selectedOrbiter = nil
@@ -1186,12 +1449,29 @@ function triggerRpmCollapse()
   moon.breakAccel = 54
   moon.boostDurations = {}
   moon.boost = 0
+  spawnTimingPopup(moon.x, moon.y - BODY_VISUAL.moonRadius * 2.5, moon.z or 0, "Collapse", TIMING_OUTCOME_STYLE.miss.color, 0.62, 8)
+end
+
+local function calculateCollapseShardReward()
+  local maxRpm = state.maxRpmReached or 0
+  local perfectHits = state.perfectHits or 0
+  local highRiskSeconds = state.secondsAbove70rpm or 0
+  local raw = maxRpm * SLICE.rewardRpmWeight
+    + perfectHits * SLICE.rewardPerfectWeight
+    + highRiskSeconds * SLICE.rewardHighRiskSecondsWeight
+  return math.max(SLICE.minimumReward, math.floor(raw))
 end
 
 local function completeRpmCollapse()
+  local reward = calculateCollapseShardReward()
+  state.shardsGainedThisRun = reward
+  state.totalShards = math.max(0, math.floor((state.totalShards or 0) + reward))
+  persistence.totalShards = state.totalShards
+  saveTotalShards(state.totalShards)
   state.gameOver = true
   state.collapseSequenceActive = false
   state.collapseTimer = 0
+  state.collapseFreezeTimer = 0
   state.screenShakeX = 0
   state.screenShakeY = 0
 end
@@ -1223,6 +1503,7 @@ function restartRun()
   local stars = state.stars or {}
   local dither = state.sphereDitherEnabled
   local borderless = state.borderlessFullscreen
+  local totalShards = state.totalShards or persistence.totalShards or 0
   local skillUnlocks = {
     speedWaveUnlocked = state.speedWaveUnlocked,
     speedClickUnlocked = state.speedClickUnlocked,
@@ -1235,6 +1516,7 @@ function restartRun()
     speedWaveUnlocked = skillUnlocks.speedWaveUnlocked,
     speedClickUnlocked = skillUnlocks.speedClickUnlocked,
     blackHoleShaderUnlocked = skillUnlocks.blackHoleShaderUnlocked,
+    totalShards = totalShards,
   })
   scene = SCENE_GAME
   skillTree.dragging = false
@@ -1368,7 +1650,7 @@ initGameSystems = function()
     getTransientBoost = function(orbiter)
       return runtime.upgrades:getSpeedWaveBoost(orbiter)
     end,
-    onOrbitGainFx = spawnOrbitGainFx,
+    onOrbitGainFx = state.singleMoonMode and nil or spawnOrbitGainFx,
     onOrbitsEarned = function(count)
       if runtime.progression then
         runtime.progression:onOrbitsEarned(count)
@@ -1377,6 +1659,13 @@ initGameSystems = function()
   })
 
   runtime.progression:update()
+
+  if state.singleMoonMode then
+    ensureSingleMoonExists()
+    state.currentRpm = state.baseRpm or SLICE.baseMoonRpm
+    state.temporaryRpm = state.tempBurstRpm or 0
+    syncSingleMoonSpeed()
+  end
 end
 
 local function drawBackground()
@@ -1408,11 +1697,14 @@ function orbitalPathPoint(target, angle, radiusOffset, originX, originY, zOffset
   return x, y, z
 end
 
-function drawOrbitalPathSegment(target, originX, originY, zOffset, startAngle, spanAngle, frontPass, r, g, b, alpha, radiusOffset)
+function drawOrbitalPathSegment(target, originX, originY, zOffset, startAngle, spanAngle, frontPass, r, g, b, alpha, radiusOffset, segmentStep, snapToPixel, useLighting)
   local cp = math.cos(target.plane)
   local sp = math.sin(target.plane)
-  local stepCount = math.max(4, math.ceil(math.abs(spanAngle) / 0.14))
+  local stepSize = segmentStep or 0.14
+  local stepCount = math.max(4, math.ceil(math.abs(spanAngle) / stepSize))
   local stepAngle = spanAngle / stepCount
+  local shouldSnap = snapToPixel ~= false
+  local shouldLight = useLighting ~= false
   local px, py, pz
   for i = 0, stepCount do
     local a = startAngle + stepAngle * i
@@ -1420,24 +1712,34 @@ function drawOrbitalPathSegment(target, originX, originY, zOffset, startAngle, s
     if px then
       local segZ = (pz + z) * 0.5
       if orbitSegmentVisible(frontPass, segZ) then
-        local segLight = cameraLightAt((px + x) * 0.5, (py + y) * 0.5, segZ)
-        setLitColorDirect(r, g, b, segLight, alpha)
+        if shouldLight then
+          local segLight = cameraLightAt((px + x) * 0.5, (py + y) * 0.5, segZ)
+          setLitColorDirect(r, g, b, segLight, alpha)
+        else
+          setColorDirect(r, g, b, alpha)
+        end
         local sx0, sy0 = projectWorldPoint(px, py, pz)
         local sx1, sy1 = projectWorldPoint(x, y, z)
-        love.graphics.line(math.floor(sx0 + 0.5), math.floor(sy0 + 0.5), math.floor(sx1 + 0.5), math.floor(sy1 + 0.5))
+        if shouldSnap then
+          sx0, sy0 = math.floor(sx0 + 0.5), math.floor(sy0 + 0.5)
+          sx1, sy1 = math.floor(sx1 + 0.5), math.floor(sy1 + 0.5)
+        end
+        love.graphics.line(sx0, sy0, sx1, sy1)
       end
     end
     px, py, pz = x, y, z
   end
 end
 
-function drawOrbitalCapsuleBorder(target, originX, originY, zOffset, startAngle, spanAngle, frontPass, r, g, b, alpha, halfWidth)
+function drawOrbitalCapsuleBorder(target, originX, originY, zOffset, startAngle, spanAngle, frontPass, r, g, b, alpha, halfWidth, segmentStep, snapToPixel, useLighting)
   local width = math.max(0.4, halfWidth or 1)
-  drawOrbitalPathSegment(target, originX, originY, zOffset, startAngle, spanAngle, frontPass, r, g, b, alpha, -width)
-  drawOrbitalPathSegment(target, originX, originY, zOffset, startAngle, spanAngle, frontPass, r, g, b, alpha, width)
+  drawOrbitalPathSegment(target, originX, originY, zOffset, startAngle, spanAngle, frontPass, r, g, b, alpha, -width, segmentStep, snapToPixel, useLighting)
+  drawOrbitalPathSegment(target, originX, originY, zOffset, startAngle, spanAngle, frontPass, r, g, b, alpha, width, segmentStep, snapToPixel, useLighting)
 
   local cp = math.cos(target.plane)
   local sp = math.sin(target.plane)
+  local shouldSnap = snapToPixel ~= false
+  local shouldLight = useLighting ~= false
   local function drawEndCap(angle)
     local innerX, innerY, innerZ = orbitalPathPoint(target, angle, -width, originX, originY, zOffset, cp, sp)
     local outerX, outerY, outerZ = orbitalPathPoint(target, angle, width, originX, originY, zOffset, cp, sp)
@@ -1445,11 +1747,19 @@ function drawOrbitalCapsuleBorder(target, originX, originY, zOffset, startAngle,
     if not orbitSegmentVisible(frontPass, segZ) then
       return
     end
-    local segLight = cameraLightAt((innerX + outerX) * 0.5, (innerY + outerY) * 0.5, segZ)
-    setLitColorDirect(r, g, b, segLight, alpha)
+    if shouldLight then
+      local segLight = cameraLightAt((innerX + outerX) * 0.5, (innerY + outerY) * 0.5, segZ)
+      setLitColorDirect(r, g, b, segLight, alpha)
+    else
+      setColorDirect(r, g, b, alpha)
+    end
     local sx0, sy0 = projectWorldPoint(innerX, innerY, innerZ)
     local sx1, sy1 = projectWorldPoint(outerX, outerY, outerZ)
-    love.graphics.line(math.floor(sx0 + 0.5), math.floor(sy0 + 0.5), math.floor(sx1 + 0.5), math.floor(sy1 + 0.5))
+    if shouldSnap then
+      sx0, sy0 = math.floor(sx0 + 0.5), math.floor(sy0 + 0.5)
+      sx1, sy1 = math.floor(sx1 + 0.5), math.floor(sy1 + 0.5)
+    end
+    love.graphics.line(sx0, sy0, sx1, sy1)
   end
 
   drawEndCap(startAngle)
@@ -1488,23 +1798,18 @@ function drawSingleMoonTimingGhost(frontPass)
   if not moon then
     return
   end
-  if (not Systems.MoonTiming.isZoneVisible(moon)) and (not Systems.MoonTiming.isCharging(moon)) then
+  if not Systems.MoonTiming.isZoneVisible(moon) then
     return
   end
 
   local originX, originY, originZ = orbiterOrbitOrigin(moon)
-  local spanAngle = Systems.MoonTiming.windowSpanAngle(WORLD.twoPi)
-  local startAngle = Systems.MoonTiming.windowCenterAngle(moon, WORLD.twoPi) - spanAngle * 0.5
+  local goodSpan = Systems.MoonTiming.goodSpanAngle(WORLD.twoPi)
+  local perfectSpan = Systems.MoonTiming.perfectSpanAngle(WORLD.twoPi)
+  local ghostSegmentStep = 0.06
+  local center = Systems.MoonTiming.windowCenterAngle(moon, WORLD.twoPi)
+  local startAngle = center - goodSpan * 0.5
+  local perfectStart = center - perfectSpan * 0.5
   local halfWidth = math.min(Systems.MoonTiming.config.ghostHalfWidth, math.max(1.4, moon.radius * 0.05))
-  local zoneR = SELECTED_ORBIT_COLOR[1]
-  local zoneG = SELECTED_ORBIT_COLOR[2]
-  local zoneB = SELECTED_ORBIT_COLOR[3]
-  local zoneAlpha = Systems.MoonTiming.config.ghostAlpha
-  local charging = Systems.MoonTiming.isCharging(moon)
-  if charging then
-    zoneR, zoneG, zoneB = timingFreePulseColor()
-    zoneAlpha = 0.96
-  end
 
   love.graphics.setLineWidth(1)
   drawOrbitalCapsuleBorder(
@@ -1513,67 +1818,87 @@ function drawSingleMoonTimingGhost(frontPass)
     originY,
     originZ + (moon.zBase or 0),
     startAngle,
-    spanAngle,
+    goodSpan,
     frontPass,
-    zoneR,
-    zoneG,
-    zoneB,
-    zoneAlpha,
-    halfWidth
+    swatch.brightest[1],
+    swatch.brightest[2],
+    swatch.brightest[3],
+    0.64,
+    halfWidth,
+    ghostSegmentStep,
+    false,
+    false
   )
-
-  if not charging then
-    return
-  end
-
-  local fillProgress = Systems.MoonTiming.chargeProgress(moon)
-  if fillProgress <= 0 then
-    return
-  end
-  local fillSpan = spanAngle * fillProgress
 
   drawOrbitalCapsuleBorder(
     moon,
     originX,
     originY,
     originZ + (moon.zBase or 0),
-    startAngle,
-    fillSpan,
+    perfectStart,
+    perfectSpan,
     frontPass,
-    zoneR,
-    zoneG,
-    zoneB,
+    swatch.brightest[1],
+    swatch.brightest[2],
+    swatch.brightest[3],
     0.98,
-    halfWidth
+    halfWidth * 0.50,
+    ghostSegmentStep,
+    false,
+    false
   )
-  drawOrbitalPathSegment(moon, originX, originY, originZ + (moon.zBase or 0), startAngle, fillSpan, frontPass, zoneR, zoneG, zoneB, 0.78, 0)
+
+  -- Perfect window is the only filled subsection.
   drawOrbitalPathSegment(
     moon,
     originX,
     originY,
     originZ + (moon.zBase or 0),
-    startAngle,
-    fillSpan,
+    perfectStart,
+    perfectSpan,
     frontPass,
-    zoneR,
-    zoneG,
-    zoneB,
-    0.74,
-    -halfWidth * 0.45
+    swatch.brightest[1],
+    swatch.brightest[2],
+    swatch.brightest[3],
+    0.90,
+    0,
+    ghostSegmentStep,
+    false,
+    false
   )
   drawOrbitalPathSegment(
     moon,
     originX,
     originY,
     originZ + (moon.zBase or 0),
-    startAngle,
-    fillSpan,
+    perfectStart,
+    perfectSpan,
     frontPass,
-    zoneR,
-    zoneG,
-    zoneB,
-    0.74,
-    halfWidth * 0.45
+    swatch.brightest[1],
+    swatch.brightest[2],
+    swatch.brightest[3],
+    0.72,
+    -halfWidth * 0.18,
+    ghostSegmentStep,
+    false,
+    false
+  )
+  drawOrbitalPathSegment(
+    moon,
+    originX,
+    originY,
+    originZ + (moon.zBase or 0),
+    perfectStart,
+    perfectSpan,
+    frontPass,
+    swatch.brightest[1],
+    swatch.brightest[2],
+    swatch.brightest[3],
+    0.72,
+    halfWidth * 0.18,
+    ghostSegmentStep,
+    false,
+    false
   )
 end
 
@@ -1675,12 +2000,24 @@ end
 local function drawPlanet()
   local t = 1 - clamp(state.planetBounceTime / GAMEPLAY.planetBounceDuration, 0, 1)
   local kick = math.sin(t * math.pi)
-  local bounceScale = 1 + kick * 0.14 * (1 - t)
+  local danger = dangerBlendForRpm(state.currentRpm or 0)
+  local pulse = 0.5 + 0.5 * math.sin(state.time * (2.6 + danger * 4.8))
+  local pulseMix = smoothstep(pulse)
+  local bounceScale = 1 + kick * 0.14 * (1 - t) + danger * (0.02 + pulseMix * 0.05)
   local px, py, projScale = projectWorldPoint(cx, cy, 0)
   local pr = math.max(3, BODY_VISUAL.planetRadius * bounceScale * projScale)
 
   setColorDirect(0, 0, 0, 1)
   love.graphics.circle("fill", px, py, pr, 44)
+  if danger > 0 then
+    setColorDirect(
+      lerp(swatch.mid[1], swatch.bright[1], danger),
+      lerp(swatch.mid[2], swatch.bright[2], danger),
+      lerp(swatch.mid[3], swatch.bright[3], danger),
+      0.16 + 0.24 * pulseMix * danger
+    )
+    love.graphics.circle("line", px, py, pr + 4 + 6 * danger, 44)
+  end
   state.planetVisualRadius = pr * zoom
 end
 
@@ -1820,14 +2157,17 @@ local function drawMoon(moon)
     end
   end
 
-  if hasActiveBoost(moon) then
-    local baseTrailLen = math.min(moon.radius * 2.2, 20 + moon.boost * 28)
-    local originX, originY, originZ = orbiterOrbitOrigin(moon)
-    drawOrbitalTrail(moon, baseTrailLen, 0.48, 0.03, originX, originY, originZ, moon.light)
-  end
+  local danger = dangerBlendForRpm(state.currentRpm or 0)
+  local tier = dangerTierForRpm(state.currentRpm or 0)
+  local hitBoost = clamp((state.hitTrailTimer or 0) / 0.36, 0, 1)
+  local trailLen = math.min(moon.radius * 3.2, 8 + danger * 22 + hitBoost * 18)
+  local headAlpha = clamp(0.10 + danger * 0.36 + hitBoost * 0.42, 0.10, 0.96)
+  local tailAlpha = clamp(0.015 + danger * 0.07, 0.01, 0.20)
+  local originX, originY, originZ = orbiterOrbitOrigin(moon)
+  drawOrbitalTrail(moon, trailLen, headAlpha, tailAlpha, originX, originY, originZ, moon.light)
 
   local childSatellites = moon.childSatellites or {}
-  local showChildOrbitPaths = state.selectedOrbiter == moon
+  local showChildOrbitPaths = (not state.singleMoonMode) and state.selectedOrbiter == moon
   love.graphics.setLineWidth(1)
   if showChildOrbitPaths then
     for _, child in ipairs(childSatellites) do
@@ -1836,7 +2176,31 @@ local function drawMoon(moon)
   end
 
   local moonR, moonG, moonB = computeOrbiterColor(moon.angle)
-  drawLitSphere(moon.x, moon.y, moon.z, BODY_VISUAL.moonRadius, moonR, moonG, moonB, moon.light, 20)
+  local moonLight = moon.light * (1 + danger * 0.2 + hitBoost * 0.22)
+  local flicker = 1
+  if tier >= 3 then
+    flicker = 0.9 + 0.1 * math.sin(state.time * 50)
+  end
+  local haloPx, haloPy, haloScale = projectWorldPoint(moon.x, moon.y, moon.z)
+  local haloR = BODY_VISUAL.moonRadius * haloScale * (1.4 + danger * 0.5 + hitBoost * 0.8)
+  setColorDirect(
+    lerp(swatch.bright[1], swatch.brightest[1], hitBoost),
+    lerp(swatch.bright[2], swatch.brightest[2], hitBoost),
+    lerp(swatch.bright[3], swatch.brightest[3], hitBoost),
+    clamp(0.08 + danger * 0.14 + hitBoost * 0.22, 0, 0.65)
+  )
+  love.graphics.circle("fill", haloPx, haloPy, haloR, 24)
+  drawLitSphere(
+    moon.x,
+    moon.y,
+    moon.z,
+    BODY_VISUAL.moonRadius * flicker,
+    moonR,
+    moonG,
+    moonB,
+    moonLight,
+    20
+  )
 
   if showChildOrbitPaths then
     for _, child in ipairs(childSatellites) do
@@ -2037,62 +2401,67 @@ function drawSingleMoonTimingDial(centerX, topY, uiScale)
   local radius = math.max(8, math.floor(Systems.MoonTiming.config.dialRadius * uiScale + 0.5))
   local centerY = topY + radius
   local phase = Systems.MoonTiming.phase(moon, WORLD.twoPi)
+  local targetPhase = Systems.MoonTiming.targetPhase(moon, WORLD.twoPi)
+  local distanceFromTarget = Systems.MoonTiming.distanceFromTargetPhase(moon, WORLD.twoPi)
+  local zoneVisible = Systems.MoonTiming.isZoneVisible(moon)
   local handAngle = -math.pi * 0.5 + phase * WORLD.twoPi
-  local windowHalfAngle = Systems.MoonTiming.windowSpanAngle(WORLD.twoPi) * 0.5
-  local windowStart = -math.pi * 0.5 - windowHalfAngle
-  local windowEnd = -math.pi * 0.5 + windowHalfAngle
-  local zoneVisible = Systems.MoonTiming.isZoneVisible(moon) or Systems.MoonTiming.isCharging(moon)
-  local charging = Systems.MoonTiming.isCharging(moon)
-  local zoneR = SELECTED_ORBIT_COLOR[1]
-  local zoneG = SELECTED_ORBIT_COLOR[2]
-  local zoneB = SELECTED_ORBIT_COLOR[3]
-  if charging then
-    zoneR, zoneG, zoneB = timingFreePulseColor()
-  end
+  local targetAngle = -math.pi * 0.5 + targetPhase * WORLD.twoPi
+  local goodHalfAngle = Systems.MoonTiming.goodSpanAngle(WORLD.twoPi) * 0.5
+  local perfectHalfAngle = Systems.MoonTiming.perfectSpanAngle(WORLD.twoPi) * 0.5
+  local windowStart = targetAngle - goodHalfAngle
+  local windowEnd = targetAngle + goodHalfAngle
+  local perfectStart = targetAngle - perfectHalfAngle
+  local perfectEnd = targetAngle + perfectHalfAngle
 
   love.graphics.setLineWidth(1)
-  setColorScaled(swatch.brightest, 1, 0.6)
+  setColorScaled(swatch.brightest, 1, 0.70)
   love.graphics.circle("line", centerX, centerY, radius, Systems.MoonTiming.config.dialSegments)
 
   if zoneVisible then
-    setColorDirect(zoneR, zoneG, zoneB, charging and 0.24 or 0.12)
-    love.graphics.arc("fill", "pie", centerX, centerY, math.max(1, radius - 1), windowStart, windowEnd, Systems.MoonTiming.config.dialSegments)
-    setColorDirect(zoneR, zoneG, zoneB, charging and 0.96 or 0.74)
+    -- Keep the timing dial focused on the window: outline for full window,
+    -- orange fill only for the perfect subsection.
+    setColorDirect(swatch.brightest[1], swatch.brightest[2], swatch.brightest[3], 0.72)
     love.graphics.arc("line", "open", centerX, centerY, radius, windowStart, windowEnd, Systems.MoonTiming.config.dialSegments)
-  end
-
-  if charging then
-    local fillEnd = windowStart + Systems.MoonTiming.windowSpanAngle(WORLD.twoPi) * Systems.MoonTiming.chargeProgress(moon)
-    setColorDirect(zoneR, zoneG, zoneB, 0.84)
-    love.graphics.arc("fill", "pie", centerX, centerY, math.max(1, radius - 2), windowStart, fillEnd, Systems.MoonTiming.config.dialSegments)
+    setColorDirect(swatch.brightest[1], swatch.brightest[2], swatch.brightest[3], 0.34)
+    love.graphics.arc("fill", "pie", centerX, centerY, math.max(1, radius - 2), perfectStart, perfectEnd, Systems.MoonTiming.config.dialSegments)
+    setColorDirect(swatch.brightest[1], swatch.brightest[2], swatch.brightest[3], 0.92)
+    love.graphics.arc("line", "open", centerX, centerY, math.max(1, radius - 1), perfectStart, perfectEnd, Systems.MoonTiming.config.dialSegments)
   end
 
   local handR = radius - 1
   local handX = centerX + math.cos(handAngle) * handR
   local handY = centerY + math.sin(handAngle) * handR
-  if zoneVisible and Systems.MoonTiming.isInWindow(moon, WORLD.twoPi) then
-    setColorDirect(zoneR, zoneG, zoneB, 0.96)
+  if zoneVisible and distanceFromTarget <= SLICE.perfectWindow then
+    setColorDirect(swatch.brightest[1], swatch.brightest[2], swatch.brightest[3], 1)
+  elseif zoneVisible and distanceFromTarget <= SLICE.goodWindow then
+    setColorDirect(swatch.bright[1], swatch.bright[2], swatch.bright[3], 0.94)
   else
     setColorScaled(swatch.bright, 1, 0.92)
   end
   love.graphics.line(centerX, centerY, handX, handY)
 
-  setColorScaled(swatch.brightest, 1, 0.9)
+  -- No target-point marker; keep the indicator about timing windows only.
+  setColorScaled(swatch.brightest, 1, 0.92)
   love.graphics.circle("fill", centerX, centerY, math.max(1, math.floor(uiScale + 0.5)), 12)
   return radius * 2 + math.floor(6 * uiScale)
 end
 
 function drawRpmLimitBar(centerX, topY, uiScale)
   local barW = math.max(80, math.floor(GAMEPLAY.rpmBarWidth * uiScale + 0.5))
-  local barH = math.max(4, math.floor(GAMEPLAY.rpmBarHeight * uiScale + 0.5))
+  local barH = math.max(6, math.floor(GAMEPLAY.rpmBarHeight * uiScale + 0.5))
   local barX = math.floor(centerX - barW * 0.5)
   local barY = math.floor(topY)
   local fill = clamp(state.rpmLimitFill or 0, 0, 1)
   local tempFill = clamp(state.rpmLimitTempFill or 0, 0, 1)
   local tempVisibleFill = clamp(math.min(tempFill, fill), 0, fill)
+  local danger = dangerBlendForRpm(state.currentRpm or 0)
+  local pulse = 0.5 + 0.5 * math.sin(state.time * (8 + danger * 8))
+  local pulseMix = smoothstep(pulse)
 
-  local r, g, b = SELECTED_ORBIT_COLOR[1], SELECTED_ORBIT_COLOR[2], SELECTED_ORBIT_COLOR[3]
-  setColorDirect(r, g, b, 0.92)
+  local borderR = lerp(swatch.bright[1], swatch.brightest[1], danger)
+  local borderG = lerp(swatch.bright[2], swatch.mid[2], danger)
+  local borderB = lerp(swatch.bright[3], swatch.mid[3], danger)
+  setColorDirect(borderR, borderG, borderB, 0.82 + 0.16 * pulseMix * danger)
   love.graphics.rectangle("line", barX, barY, barW, barH)
 
   if fill > 0 then
@@ -2103,14 +2472,19 @@ function drawRpmLimitBar(centerX, topY, uiScale)
     local tempFillW = math.min(fillW, math.floor(innerW * tempVisibleFill + 0.5))
     local baseFillW = math.max(0, fillW - tempFillW)
     if baseFillW > 0 then
-      setColorDirect(r, g, b, 0.46)
+      setColorDirect(lerp(0.58, 0.92, danger), lerp(0.18, 0.22, danger), lerp(0.26, 0.24, danger), 0.55)
       love.graphics.rectangle("fill", barX + innerPad, barY + innerPad, baseFillW, innerH)
     end
     if tempFillW > 0 then
-      setColorDirect(0.92, 0.34, 0.30, 0.8)
+      setColorDirect(1, 0.48 + 0.10 * pulseMix, 0.28, 0.86)
       love.graphics.rectangle("fill", barX + innerPad + baseFillW, barY + innerPad, tempFillW, innerH)
     end
   end
+
+  local thresholdLabel = tostring(math.floor(SLICE.collapseRpm))
+  local font = love.graphics.getFont()
+  setColorScaled(swatch.brightest, 1, 0.56)
+  drawText(thresholdLabel, barX + barW - font:getWidth(thresholdLabel), barY - font:getHeight() - math.floor(1 * uiScale))
 
   return barH + math.floor(6 * uiScale)
 end
@@ -2119,180 +2493,74 @@ local function drawHud()
   local font = love.graphics.getFont()
   local lineH = math.floor(font:getHeight())
   local uiScale = scale >= 1 and scale or 1
-  local mouseX, mouseY = love.mouse.getPosition()
-  local counterFont = getOrbitCounterFont()
-  local counterText = tostring(state.orbits)
-  local counterTextW = counterFont:getWidth(counterText)
-  local counterTextH = counterFont:getHeight()
-  local counterW = counterTextW
-  local counterCenterX = offsetX + (WORLD.gameW * scale) * 0.5
-  local counterX = counterCenterX - counterW * 0.5
-  local counterY = offsetY + math.floor(8 * uiScale)
-
-  love.graphics.setFont(counterFont)
-  love.graphics.setColor(palette.text)
-  drawText(counterText, counterX, counterY)
-
+  local centerX = offsetX + (WORLD.gameW * scale) * 0.5
+  local topY = offsetY + math.floor(6 * uiScale)
   local totalRpm = state.currentRpm or 0
+  local danger = dangerBlendForRpm(totalRpm)
+  local tier = dangerTierForRpm(totalRpm)
+  local pulse = 0.5 + 0.5 * math.sin(state.time * (6 + tier * 3))
+  local pulseMix = smoothstep(pulse)
 
-  local rpmText = string.format("%.2f rpm", totalRpm)
-  local rpmTextW = font:getWidth(rpmText)
-  local rpmX = counterCenterX - rpmTextW * 0.5
-  local rpmY = counterY + counterTextH + math.floor(2 * uiScale)
+  local counterFont = getOrbitCounterFont()
+  local rpmText = string.format("%.1f RPM", totalRpm)
+  local rpmTextW = counterFont:getWidth(rpmText)
+  local rpmY = topY
+  love.graphics.setFont(counterFont)
+  setColorDirect(lerp(swatch.brightest[1], 1, danger), lerp(swatch.brightest[2], 0.42, danger), lerp(swatch.brightest[3], 0.33, danger), 0.96)
+  drawText(rpmText, centerX - rpmTextW * 0.5, rpmY)
+
   love.graphics.setFont(font)
-  setColorScaled(palette.accent, 1, 1)
-  drawText(rpmText, rpmX, rpmY)
-  local barTopY = rpmY + lineH + math.floor(2 * uiScale)
-  local barSpacing = drawRpmLimitBar(counterCenterX, barTopY, uiScale)
-  drawSingleMoonTimingDial(counterCenterX, barTopY + barSpacing, uiScale)
+  local baseText = string.format("base %.1f + perm %.1f + burst %.1f", state.baseRpm or 0, state.permanentRpmBonus or 0, state.tempBurstRpm or 0)
+  setColorScaled(palette.text, 1, 0.84)
+  drawText(baseText, centerX - font:getWidth(baseText) * 0.5, rpmY + counterFont:getHeight() - math.floor(2 * uiScale))
 
-  local panelX = math.floor(offsetX + 12 * uiScale)
-  local panelY = math.floor(offsetY + 12 * uiScale)
-  local panelW = math.floor(292 * uiScale)
-  local padX = math.floor(8 * uiScale)
-  local rowH = lineH + math.floor(5 * uiScale)
-  local gap = math.floor(2 * uiScale)
-  local rowTextInsetY = math.floor(2 * uiScale)
-  local y = panelY + math.floor(6 * uiScale)
+  local resonanceText = string.format("resonance %.1f / %d", state.resonance or 0, state.maxResonance or SLICE.maxResonance)
+  setColorDirect(
+    lerp(swatch.bright[1], swatch.brightest[1], pulseMix),
+    lerp(swatch.bright[2], swatch.brightest[2], pulseMix),
+    lerp(swatch.bright[3], swatch.brightest[3], pulseMix),
+    0.86 + 0.10 * danger
+  )
+  drawText(resonanceText, centerX - font:getWidth(resonanceText) * 0.5, rpmY + counterFont:getHeight() + lineH - math.floor(2 * uiScale))
 
-  local function drawHeader(text)
-    love.graphics.setColor(palette.text)
-    drawText(text, panelX + padX, y)
-    y = y + lineH + math.floor(2 * uiScale)
+  local barTopY = rpmY + counterFont:getHeight() + lineH * 2 + math.floor(2 * uiScale)
+  local barSpacing = drawRpmLimitBar(centerX, barTopY, uiScale)
+  local dialSpacing = drawSingleMoonTimingDial(centerX, barTopY + barSpacing, uiScale)
+
+  local statsX = math.floor(offsetX + 14 * uiScale)
+  local statsY = math.floor(topY + math.max(0, dialSpacing - lineH))
+  local statsLines = {
+    string.format("perfect %d", state.perfectHits or 0),
+    string.format("good %d", state.goodHits or 0),
+    string.format("max rpm %.1f", state.maxRpmReached or 0),
+    string.format("longest resonance %.1f", state.longestResonance or 0),
+    string.format("time above 70 %.1fs", state.secondsAbove70rpm or 0),
+    string.format("Collapse Shards %d", state.totalShards or 0),
+  }
+
+  setColorScaled(swatch.darkest, 1, 0.84)
+  local panelW = 292 * uiScale
+  local panelH = (lineH + 2 * uiScale) * #statsLines + 10 * uiScale
+  love.graphics.rectangle("fill", statsX - 6 * uiScale, statsY - 4 * uiScale, panelW, panelH)
+  setColorScaled(swatch.brightest, 1, 0.72)
+  love.graphics.rectangle("line", statsX - 6 * uiScale, statsY - 4 * uiScale, panelW, panelH)
+  for i = 1, #statsLines do
+    setColorScaled(palette.text, 1, 0.84 + (i == 6 and 0.10 or 0))
+    drawText(statsLines[i], statsX, statsY + (i - 1) * (lineH + math.floor(2 * uiScale)))
   end
 
-  local function drawRow(btn, label, status, enabled, orbitCost, statusStyle)
-    btn.x = panelX + padX
-    btn.y = y
-    btn.w = panelW - padX * 2
-    btn.h = rowH
-    local alpha = enabled and 1 or 0.40
-    local hovered = pointInRect(mouseX, mouseY, btn)
-    if hovered then
-      setColorScaled(swatch.brightest, 1, 0.95 * alpha)
-      love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h)
-    end
-    setColorScaled(palette.text, 1, alpha)
-    drawText(label, btn.x + math.floor(8 * uiScale), btn.y + rowTextInsetY)
-    if status and status ~= "" then
-      local sw = font:getWidth(status)
-      local statusX = btn.x + btn.w - sw - math.floor(8 * uiScale)
-      if statusStyle == "rainbow-fast" then
-        local pulse = 0.5 + 0.5 * math.sin((state.time / 1.2) * WORLD.twoPi)
-        local blend = smoothstep(pulse)
-        local r = lerp(swatch.bright[1], swatch.mid[1], blend)
-        local g = lerp(swatch.bright[2], swatch.mid[2], blend)
-        local b = lerp(swatch.bright[3], swatch.mid[3], blend)
-        setColorDirect(r, g, b, alpha)
-        drawText(status, statusX, btn.y + rowTextInsetY)
-      else
-        setColorScaled(palette.text, 1, alpha)
-        drawText(status, statusX, btn.y + rowTextInsetY)
-      end
-    end
-    y = y + rowH + gap
-    return hovered
-  end
-
-  local megaPlanetBuyCost = megaPlanetCost()
-  local planetBuyCost = planetCost()
-  local moonBuyCost = moonCost()
-  local moonIsFree = moonBuyCost <= 0
-  local moonStatus = moonIsFree and "free" or tostring(moonBuyCost)
-  local moonStatusStyle = moonIsFree and "rainbow-fast" or nil
-  local canBuyMegaPlanet = state.orbits >= megaPlanetBuyCost
-  local canBuyPlanet = state.orbits >= planetBuyCost
-  local canBuyMoon = #state.moons < ECONOMY.maxMoons and (moonIsFree or state.orbits >= moonBuyCost)
-  local canBuySatellite = #state.satellites < ECONOMY.maxSatellites and state.orbits >= satelliteCost()
-  local satelliteStatus = tostring(satelliteCost())
-
-  local sectionCount = 1
-  local rowCount = 4
-  local panelH = math.floor(6 * uiScale) + sectionCount * (lineH + math.floor(2 * uiScale)) + rowCount * (rowH + gap) + math.floor(4 * uiScale)
-
-  local hoveredTooltipLines
-  local hoveredTooltipBtn
-
-  love.graphics.setScissor(panelX + 1, panelY + 1, panelW - 2, panelH - 2)
-
-  drawHeader("generators")
-  local megaPlanetHovered = drawRow(ui.buyMegaPlanetBtn, "mega planet", tostring(megaPlanetBuyCost), canBuyMegaPlanet, true)
-  if megaPlanetHovered then
-    hoveredTooltipBtn = ui.buyMegaPlanetBtn
-    hoveredTooltipLines = {
-      {
-        pre = "Adds a massive planet orbiting the core.",
-        hi = "",
-        post = "",
-      },
-      {
-        pre = "Size is ",
-        hi = "5x",
-        post = " the main planet.",
-      },
-    }
-  end
-  local planetHovered = drawRow(ui.buyPlanetBtn, "planet", tostring(planetBuyCost), canBuyPlanet, true)
-  if planetHovered then
-    hoveredTooltipBtn = ui.buyPlanetBtn
-    hoveredTooltipLines = {
-      {
-        pre = "Adds a large planet orbiting the core.",
-        hi = "",
-        post = "",
-      },
-      {
-        pre = "Size is ",
-        hi = "80%",
-        post = " of the main planet.",
-      },
-    }
-  end
-  local moonHovered = drawRow(ui.buyMoonBtn, "moon", moonStatus, canBuyMoon, true, moonStatusStyle)
-  if moonHovered then
-    hoveredTooltipBtn = ui.buyMoonBtn
-    hoveredTooltipLines = {
-      {
-        pre = "Adds a moon orbiting the planet.",
-        hi = "",
-        post = "",
-      },
-      {
-        pre = "Moons can host ",
-        hi = "moon satellites",
-        post = ".",
-      },
-    }
-  end
-  local satelliteHovered = drawRow(ui.buySatelliteBtn, "satellite", satelliteStatus, canBuySatellite)
-  if satelliteHovered then
-    hoveredTooltipBtn = ui.buySatelliteBtn
-    hoveredTooltipLines = {
-      {
-        pre = "Adds a satellite orbiting the planet.",
-        hi = "",
-        post = "",
-      },
-      {
-        pre = "Satellites generate ",
-        hi = "orbits",
-        post = " when clicked.",
-      },
-    }
-  end
-  love.graphics.setScissor()
-
-  drawHoverTooltip(hoveredTooltipLines, hoveredTooltipBtn, uiScale, lineH, false)
-
-  love.graphics.setColor(palette.muted)
   local viewportBottom = offsetY + WORLD.gameH * scale
-  local helpY1 = math.floor(viewportBottom - lineH * 3 - 12 * uiScale)
-  local helpY2 = math.floor(viewportBottom - lineH * 2 - 8 * uiScale)
-  local helpY3 = math.floor(viewportBottom - lineH - 4 * uiScale)
-  local helpX = panelX
-  drawText(string.format("zoom %.2fx  scroll to zoom", zoom), helpX, helpY1)
-  drawText("l dither " .. (state.sphereDitherEnabled and "on" or "off"), helpX, helpY2)
-  drawText("b fullscreen", helpX, helpY3)
+  local helpX = statsX
+  setColorScaled(palette.muted, 1, 0.82)
+  drawText("space boost  r restart  esc quit", helpX, math.floor(viewportBottom - lineH * 3 - 10 * uiScale))
+  drawText(string.format("threshold %.0f rpm", SLICE.collapseRpm), helpX, math.floor(viewportBottom - lineH * 2 - 6 * uiScale))
+  if tier >= 3 then
+    setColorDirect(1, 0.34 + 0.20 * pulseMix, 0.30, 0.9)
+    drawText("REDLINE", helpX, math.floor(viewportBottom - lineH - 2 * uiScale))
+  else
+    setColorScaled(palette.muted, 1, 0.70)
+    drawText("time your boost inside the target arc", helpX, math.floor(viewportBottom - lineH - 2 * uiScale))
+  end
 end
 
 local function drawPanelButton(btn, label, uiScale, font, mouseX, mouseY)
@@ -2381,8 +2649,8 @@ function drawGameOverOverlay()
 
   local font = love.graphics.getFont()
   local uiScale = scale >= 1 and scale or 1
-  local panelW = math.floor(420 * uiScale)
-  local panelH = math.floor(170 * uiScale)
+  local panelW = math.floor(470 * uiScale)
+  local panelH = math.floor(360 * uiScale)
   local panelX = math.floor((w - panelW) * 0.5)
   local panelY = math.floor((h - panelH) * 0.5)
   local pad = math.floor(12 * uiScale)
@@ -2392,18 +2660,43 @@ function drawGameOverOverlay()
   setColorScaled(swatch.brightest, 1, 0.96)
   love.graphics.rectangle("line", panelX, panelY, panelW, panelH)
 
-  local title = "system collapse"
-  local subtitle = string.format("rpm limit reached: %.0f", GAMEPLAY.rpmCollapseThreshold)
+  local title = "collapse"
+  local subtitle = string.format("rpm threshold reached: %.0f", GAMEPLAY.rpmCollapseThreshold)
   setColorScaled(swatch.brightest, 1, 1)
   drawText(title, panelX + pad, panelY + pad)
   setColorScaled(palette.text, 1, 0.82)
   drawText(subtitle, panelX + pad, panelY + pad + font:getHeight() + math.floor(2 * uiScale))
 
-  local btnW = math.floor(132 * uiScale)
+  local lineH = font:getHeight()
+  local statY = panelY + pad + lineH * 2 + math.floor(8 * uiScale)
+  local labelW = math.floor(220 * uiScale)
+  local valueX = panelX + pad + labelW
+  local stats = {
+    {"max rpm reached", string.format("%.1f", state.maxRpmReached or 0)},
+    {"perfect hits", tostring(state.perfectHits or 0)},
+    {"good hits", tostring(state.goodHits or 0)},
+    {"longest resonance", string.format("%.1f", state.longestResonance or 0)},
+    {"time above 70 rpm", string.format("%.1fs", state.secondsAbove70rpm or 0)},
+    {"Collapse Shards gained", tostring(state.shardsGainedThisRun or 0)},
+    {"total Collapse Shards", tostring(state.totalShards or 0)},
+  }
+
+  for i = 1, #stats do
+    local rowY = statY + (i - 1) * (lineH + math.floor(3 * uiScale))
+    local row = stats[i]
+    setColorScaled(palette.text, 1, 0.82)
+    drawText(row[1], panelX + pad, rowY)
+    setColorScaled(palette.accent, 1, 1)
+    drawText(row[2], valueX, rowY)
+  end
+
+  local prompt = "press r to restart"
+  setColorScaled(swatch.brightest, 1, 0.90)
+  drawText(prompt, panelX + pad, panelY + panelH - math.floor((lineH + 44) * uiScale))
+
+  local btnW = math.floor(152 * uiScale)
   local btnH = math.floor((font:getHeight() + 8) * uiScale)
-  local btnGap = math.floor(12 * uiScale)
-  local rowW = btnW * 2 + btnGap
-  local rowX = panelX + math.floor((panelW - rowW) * 0.5)
+  local rowX = panelX + math.floor((panelW - btnW) * 0.5)
   local btnY = panelY + panelH - btnH - pad
 
   ui.restartBtn.x = rowX
@@ -2411,16 +2704,10 @@ function drawGameOverOverlay()
   ui.restartBtn.w = btnW
   ui.restartBtn.h = btnH
   ui.restartBtn.visible = true
-
-  ui.skillsBtn.x = rowX + btnW + btnGap
-  ui.skillsBtn.y = btnY
-  ui.skillsBtn.w = btnW
-  ui.skillsBtn.h = btnH
-  ui.skillsBtn.visible = true
+  ui.skillsBtn.visible = false
 
   local mouseX, mouseY = love.mouse.getPosition()
   drawPanelButton(ui.restartBtn, "restart", uiScale, font, mouseX, mouseY)
-  drawPanelButton(ui.skillsBtn, "skills", uiScale, font, mouseX, mouseY)
 end
 
 local function drawSkillTreeScene()
@@ -2751,6 +3038,93 @@ local function drawSpeedWaveText()
   drawText("speed wave", popup.x + 8 * uiScale, popup.y - 10 * uiScale - yLift)
 end
 
+local function drawTimingWorldFx()
+  local font = love.graphics.getFont()
+  for i = 1, #state.timingRings do
+    local ring = state.timingRings[i]
+    local t = clamp(ring.age / ring.life, 0, 1)
+    local alpha = (1 - smoothstep(t)) * (ring.alpha or 0.8)
+    local radius = lerp(ring.radiusStart, ring.radiusEnd, t)
+    local px, py, pScale = projectWorldPoint(ring.x, ring.y, ring.z)
+    setColorDirect(ring.color[1], ring.color[2], ring.color[3], alpha)
+    love.graphics.setLineWidth(math.max(1, pScale))
+    love.graphics.circle("line", px, py, radius * pScale, 22)
+  end
+  love.graphics.setLineWidth(1)
+
+  for i = 1, #state.timingPopups do
+    local popup = state.timingPopups[i]
+    local t = clamp(popup.age / popup.life, 0, 1)
+    local alpha = 1 - smoothstep(t)
+    local px, py = projectWorldPoint(popup.x, popup.y, popup.z)
+    local text = popup.text or ""
+    local drawX = px - font:getWidth(text) * 0.5
+    setColorDirect(popup.color[1], popup.color[2], popup.color[3], alpha)
+    drawText(text, drawX, py)
+  end
+end
+
+local function drawDangerOverlay()
+  local danger = dangerBlendForRpm(state.currentRpm or 0)
+  local redline = clamp(((state.currentRpm or 0) - SLICE.dangerousRpm) / math.max(1, SLICE.collapseRpm - SLICE.dangerousRpm), 0, 1)
+  local pulse = 0.5 + 0.5 * math.sin(state.time * (7 + redline * 8))
+  local pulseMix = smoothstep(pulse)
+  local missFlash = clamp((state.missFlashTimer or 0) / 0.13, 0, 1)
+  local collapseFlash = clamp((state.collapseFreezeTimer or 0) / math.max(0.0001, SLICE.collapseFreezeSeconds), 0, 1)
+  local flash = math.max(missFlash, collapseFlash)
+  if danger <= 0 and flash <= 0 then
+    return
+  end
+
+  local w, h = love.graphics.getDimensions()
+  if danger > 0 then
+    local edgeAlpha = clamp(danger * (0.08 + 0.14 * pulseMix), 0, 0.34)
+    setColorDirect(0.12, 0, 0, edgeAlpha)
+    local edgeSize = math.floor(math.max(10, 36 * (scale >= 1 and scale or 1)))
+    love.graphics.rectangle("fill", 0, 0, w, edgeSize)
+    love.graphics.rectangle("fill", 0, h - edgeSize, w, edgeSize)
+    love.graphics.rectangle("fill", 0, edgeSize, edgeSize, h - edgeSize * 2)
+    love.graphics.rectangle("fill", w - edgeSize, edgeSize, edgeSize, h - edgeSize * 2)
+  end
+
+  if flash > 0 then
+    local isMiss = missFlash >= collapseFlash
+    if isMiss then
+      setColorDirect(0.35, 0.14, 0.18, 0.18 * flash)
+    else
+      setColorDirect(1, 0.32, 0.24, 0.24 * flash)
+    end
+    love.graphics.rectangle("fill", 0, 0, w, h)
+  end
+end
+
+local function drawTimingGhostOverlayUiPass()
+  if scene ~= SCENE_GAME then
+    return
+  end
+  if state.gameOver then
+    return
+  end
+
+  local shakeX = state.screenShakeX or 0
+  local shakeY = state.screenShakeY or 0
+  local prevLineStyle = love.graphics.getLineStyle()
+  local prevLineJoin = love.graphics.getLineJoin()
+  love.graphics.setLineStyle("smooth")
+  love.graphics.setLineJoin("miter")
+  love.graphics.push()
+  love.graphics.translate(offsetX + shakeX, offsetY + shakeY)
+  love.graphics.scale(scale, scale)
+  love.graphics.translate(cx, cy)
+  love.graphics.scale(zoom, zoom)
+  love.graphics.translate(-cx, -cy)
+  drawSingleMoonTimingGhost(false)
+  drawSingleMoonTimingGhost(true)
+  love.graphics.pop()
+  love.graphics.setLineStyle(prevLineStyle)
+  love.graphics.setLineJoin(prevLineJoin)
+end
+
 local function initSphereShader()
   local pixelData = love.image.newImageData(1, 1)
   pixelData:setPixel(0, 0, 1, 1, 1, 1)
@@ -3057,6 +3431,8 @@ function love.load()
   initBackgroundMusic()
   initUpgradeFx()
   initClickFx()
+  persistence.totalShards = loadTotalShards()
+  state.totalShards = persistence.totalShards
   initGameSystems()
 
   recomputeViewport()
@@ -3082,6 +3458,8 @@ function love.keypressed(key)
       scene = SCENE_GAME
       skillTree.dragging = false
       playClickFx(true)
+    elseif key == "r" then
+      restartRun()
     end
     return
   end
@@ -3090,13 +3468,13 @@ function love.keypressed(key)
     if state.gameOver or state.collapseSequenceActive then
       return
     end
-    if Systems.MoonTiming.getSingleMoon(state, WORLD.twoPi) then
-      if tryTimedSingleMoonBoost() then
-        playClickFx(false)
-      else
-        playClickFx(true)
-      end
-    end
+    tryTimedSingleMoonBoost()
+    return
+  elseif key == "r" then
+    restartRun()
+    return
+  elseif key == "escape" then
+    love.event.quit()
     return
   elseif key == "b" then
     setBorderlessFullscreen(not state.borderlessFullscreen)
@@ -3130,12 +3508,17 @@ function love.update(dt)
       runtime.upgrades:update(dt)
     end
     updateBrokenMoon(dt)
+    updateTimingFeedback(dt)
   elseif state.collapseSequenceActive then
     if runtime.upgrades then
       runtime.upgrades:update(dt)
     end
-    updateBrokenMoon(dt)
+    updateTimingFeedback(dt)
     state.collapseTimer = math.max(0, state.collapseTimer - dt)
+    state.collapseFreezeTimer = math.max(0, (state.collapseFreezeTimer or 0) - dt)
+    if (state.collapseFreezeTimer or 0) <= 0 then
+      updateBrokenMoon(dt)
+    end
     if state.collapseTimer <= 0 then
       completeRpmCollapse()
     end
@@ -3143,14 +3526,22 @@ function love.update(dt)
     if runtime.upgrades then
       runtime.upgrades:update(dt)
     end
+    updateSingleMoonTiming(dt)
+    syncSingleMoonSpeed()
     if runtime.orbiters then
       runtime.orbiters:update(dt)
     end
-    updateSingleMoonTiming(dt)
     if runtime.progression then
       runtime.progression:update()
     end
     state.temporaryRpm, state.currentRpm = computeRpmBreakdown()
+    state.maxRpmReached = math.max(state.maxRpmReached or 0, state.currentRpm or 0)
+    if (state.currentRpm or 0) >= SLICE.highRiskRpm then
+      state.secondsAbove70rpm = (state.secondsAbove70rpm or 0) + dt
+    end
+    if (state.currentRpm or 0) >= SLICE.redlineRpm then
+      state.redlineFlashTimer = math.max(state.redlineFlashTimer or 0, 0.06)
+    end
     updateRpmLimitFill(dt)
     if state.currentRpm >= GAMEPLAY.rpmCollapseThreshold then
       triggerRpmCollapse()
@@ -3204,16 +3595,14 @@ function love.mousepressed(x, y, button)
       playMenuBuyClickFx()
       return
     end
-    if ui.skillsBtn.visible and pointInRect(x, y, ui.skillsBtn) then
-      scene = SCENE_SKILL_TREE
-      skillTree.dragging = false
-      playClickFx(false)
-      return
-    end
     return
   end
 
   if state.collapseSequenceActive then
+    return
+  end
+
+  if state.singleMoonMode then
     return
   end
 
@@ -3337,7 +3726,6 @@ function love.draw()
   love.graphics.translate(-cx, -cy)
 
   drawSelectedOrbit(false)
-  drawSingleMoonTimingGhost(false)
   drawSelectedLightOrbit(false)
   drawOrbiterTooltipConnector(false)
   drawLightSource(false)
@@ -3357,13 +3745,13 @@ function love.draw()
   drawPlanet()
   drawOrbiterTooltipConnector(true)
   drawSelectedOrbit(true)
-  drawSingleMoonTimingGhost(true)
   drawSelectedLightOrbit(true)
 
   for i = firstFront, #renderOrbiters do
     drawOrbiterByKind(renderOrbiters[i])
   end
   drawLightSource(true)
+  drawTimingWorldFx()
   love.graphics.pop()
 
   drawOrbitGainFx()
@@ -3404,6 +3792,8 @@ function love.draw()
   else
     love.graphics.draw(canvas, offsetX + shakeX, offsetY + shakeY, 0, scale, scale)
   end
+  drawDangerOverlay()
+  drawTimingGhostOverlayUiPass()
 
   love.graphics.setFont(getUiScreenFont())
   if scene == SCENE_SKILL_TREE then
@@ -3415,7 +3805,9 @@ function love.draw()
   ui.skillTreeBackBtn.visible = false
   ui.skillTreeRestartBtn.visible = false
   drawSpeedWaveText()
-  drawOrbiterTooltip()
+  if not state.singleMoonMode then
+    drawOrbiterTooltip()
+  end
   drawHud()
   drawGameOverOverlay()
 end
