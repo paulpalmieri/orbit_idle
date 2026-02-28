@@ -1,3 +1,11 @@
+local Systems = {
+  Modifier = require("game.systems.modifiers"),
+  Progression = require("game.systems.progression"),
+  Economy = require("game.systems.economy"),
+  Orbiters = require("game.systems.orbiters"),
+  Upgrades = require("game.systems.upgrades"),
+}
+
 local GAME_W = 1280
 local GAME_H = 720
 local TWO_PI = math.pi * 2
@@ -285,6 +293,8 @@ local ui = {
   stabilityGauge = {x = 0, y = 0, w = 0, h = 0},
   orbiterActionBtn = {x = 0, y = 0, w = 0, h = 0, visible = false, enabled = false, action = nil},
 }
+
+local runtime = {}
 
 local function activeSphereShadeStyle()
   if state.sphereDitherEnabled then
@@ -623,34 +633,61 @@ local function drawOrbitGainFx()
 end
 
 local function moonCost()
+  if #state.moons == 0 then
+    return 0
+  end
+  if runtime.economy then
+    return runtime.economy:getCost("moon")
+  end
   return MOON_COST
 end
 
 local function planetCost()
+  if runtime.economy then
+    return runtime.economy:getCost("planet")
+  end
   return PLANET_COST
 end
 
 local function megaPlanetCost()
+  if runtime.economy then
+    return runtime.economy:getCost("megaPlanet")
+  end
   return MEGA_PLANET_COST
 end
 
 local function satelliteCost()
+  if runtime.economy then
+    return runtime.economy:getCost("satellite")
+  end
   return SATELLITE_COST
 end
 
 local function moonSatelliteCost()
+  if runtime.economy then
+    return runtime.economy:getCost("moonSatellite")
+  end
   return MOON_SATELLITE_COST
 end
 
 local function speedWaveCost()
+  if runtime.upgrades then
+    return runtime.upgrades:speedWaveCost()
+  end
   return SPEED_WAVE_COST
 end
 
 local function speedClickCost()
+  if runtime.upgrades then
+    return runtime.upgrades:speedClickCost()
+  end
   return SPEED_CLICK_COST
 end
 
 local function blackHoleShaderCost()
+  if runtime.upgrades then
+    return runtime.upgrades:blackHoleShaderCost()
+  end
   return BLACK_HOLE_SHADER_COST
 end
 
@@ -762,192 +799,38 @@ end
 local updateOrbiterPosition
 
 local function addMegaPlanet()
-  local cost = megaPlanetCost()
-  if state.orbits < cost then
+  if not runtime.orbiters then
     return false
   end
-
-  state.orbits = state.orbits - cost
-
-  local megaPlanetIndex = #state.megaPlanets
-  local orbital = createOrbitalParams(ORBIT_CONFIGS.megaPlanet, megaPlanetIndex)
-  local megaPlanet = {
-    angle = orbital.angle,
-    radius = orbital.radius,
-    flatten = orbital.flatten,
-    depthScale = orbital.depthScale,
-    zBase = orbital.zBase or 0,
-    plane = orbital.plane,
-    speed = orbital.speed,
-    boost = 0,
-    boostDurations = {},
-    x = cx,
-    y = cy,
-    z = 0,
-    light = 1,
-    kind = "mega-planet",
-    revolutions = 0,
-  }
-
-  updateOrbiterPosition(megaPlanet)
-  assignRenderOrder(megaPlanet)
-  table.insert(state.megaPlanets, megaPlanet)
-  return true
+  return runtime.orbiters:addMegaPlanet()
 end
 
 local function addPlanet()
-  local cost = planetCost()
-  if state.orbits < cost then
+  if not runtime.orbiters then
     return false
   end
-
-  state.orbits = state.orbits - cost
-
-  local planetIndex = #state.planets
-  local orbital = createOrbitalParams(ORBIT_CONFIGS.planet, planetIndex)
-  local planet = {
-    angle = orbital.angle,
-    radius = orbital.radius,
-    flatten = orbital.flatten,
-    depthScale = orbital.depthScale,
-    zBase = orbital.zBase or 0,
-    plane = orbital.plane,
-    speed = orbital.speed,
-    boost = 0,
-    boostDurations = {},
-    x = cx,
-    y = cy,
-    z = 0,
-    light = 1,
-    kind = "planet",
-    revolutions = 0,
-  }
-
-  updateOrbiterPosition(planet)
-  assignRenderOrder(planet)
-  table.insert(state.planets, planet)
-  return true
+  return runtime.orbiters:addPlanet()
 end
 
 local function addMoon(parentOrbiter)
-  if #state.moons >= MAX_MOONS then
+  if not runtime.orbiters then
     return false
   end
-  if parentOrbiter and parentOrbiter.kind ~= "planet" and parentOrbiter.kind ~= "mega-planet" then
-    return false
-  end
-
-  local cost = moonCost()
-  if state.orbits < cost then
-    return false
-  end
-
-  state.orbits = state.orbits - cost
-
-  local moonIndex = #state.moons
-  local orbital = createOrbitalParams(ORBIT_CONFIGS.moon, moonIndex)
-  local moon = {
-    angle = orbital.angle,
-    radius = orbital.radius,
-    flatten = orbital.flatten,
-    depthScale = orbital.depthScale,
-    zBase = orbital.zBase or 0,
-    plane = orbital.plane,
-    speed = orbital.speed,
-    boost = 0,
-    boostDurations = {},
-    x = cx,
-    y = cy,
-    z = 0,
-    light = 1,
-    kind = "moon",
-    parentOrbiter = parentOrbiter,
-    revolutions = 0,
-    childSatellites = {},
-  }
-
-  updateOrbiterPosition(moon)
-  assignRenderOrder(moon)
-  table.insert(state.moons, moon)
-  return true
+  return runtime.orbiters:addMoon(parentOrbiter)
 end
 
 local function addSatellite()
-  if #state.satellites >= MAX_SATELLITES then
+  if not runtime.orbiters then
     return false
   end
-
-  local cost = satelliteCost()
-  if state.orbits < cost then
-    return false
-  end
-
-  state.orbits = state.orbits - cost
-
-  local satIndex = #state.satellites
-  local orbital = createOrbitalParams(ORBIT_CONFIGS.satellite, satIndex)
-  local satellite = {
-    angle = orbital.angle,
-    radius = orbital.radius,
-    flatten = orbital.flatten,
-    depthScale = orbital.depthScale,
-    zBase = orbital.zBase or 0,
-    plane = orbital.plane,
-    speed = orbital.speed,
-    boost = 0,
-    boostDurations = {},
-    x = cx,
-    y = cy,
-    z = 0,
-    light = 1,
-    kind = "satellite",
-    revolutions = 0,
-  }
-
-  updateOrbiterPosition(satellite)
-  assignRenderOrder(satellite)
-  table.insert(state.satellites, satellite)
-  return true
+  return runtime.orbiters:addSatellite()
 end
 
 local function addSatelliteToMoon(moon)
-  if not moon or moon.kind ~= "moon" then
+  if not runtime.orbiters then
     return false
   end
-
-  local cost = moonSatelliteCost()
-  if state.orbits < cost then
-    return false
-  end
-
-  state.orbits = state.orbits - cost
-
-  moon.childSatellites = moon.childSatellites or {}
-  local childIndex = #moon.childSatellites
-  local orbital = createOrbitalParams(ORBIT_CONFIGS.moonChildSatellite, childIndex)
-  local child = {
-    angle = orbital.angle,
-    radius = orbital.radius,
-    flatten = orbital.flatten,
-    depthScale = orbital.depthScale,
-    zBase = orbital.zBase or 0,
-    plane = orbital.plane,
-    speed = orbital.speed,
-    boost = 0,
-    boostDurations = {},
-    x = moon.x,
-    y = moon.y,
-    z = 0,
-    light = 1,
-    kind = "moon-satellite",
-    parentOrbiter = moon,
-    parentMoon = moon,
-    revolutions = 0,
-  }
-  updateOrbiterPosition(child)
-  assignRenderOrder(child)
-  table.insert(moon.childSatellites, child)
-  return true
+  return runtime.orbiters:addSatelliteToMoon(moon)
 end
 
 function orbiterOrbitOrigin(orbiter)
@@ -973,194 +856,95 @@ updateOrbiterPosition = function(orbiter)
   updateOrbiterLight(orbiter)
 end
 
-local function updateOrbiterBoost(orbiter, dt)
-  local durations = orbiter.boostDurations or {}
-  for i = #durations, 1, -1 do
-    durations[i] = durations[i] - dt
-    if durations[i] <= 0 then
-      table.remove(durations, i)
-    end
-  end
-  orbiter.boostDurations = durations
-
-  local activeStacks = #durations
-  local targetBoost = activeStacks * PLANET_IMPULSE_TARGET_BOOST
-  local blendRate = activeStacks > 0 and PLANET_IMPULSE_RISE_RATE or PLANET_IMPULSE_FALL_RATE
-  local blend = math.min(1, dt * blendRate)
-  orbiter.boost = orbiter.boost + (targetBoost - orbiter.boost) * blend
-
-  if activeStacks == 0 and orbiter.boost < 0.001 then
-    orbiter.boost = 0
-  end
-end
-
-local function pickPlanetImpulseTarget()
-  local pool = {}
-  for _, megaPlanet in ipairs(state.megaPlanets) do
-    table.insert(pool, megaPlanet)
-  end
-  for _, planet in ipairs(state.planets) do
-    table.insert(pool, planet)
-  end
-  for _, moon in ipairs(state.moons) do
-    table.insert(pool, moon)
-    local childSatellites = moon.childSatellites or {}
-    for _, child in ipairs(childSatellites) do
-      table.insert(pool, child)
-    end
-  end
-  for _, satellite in ipairs(state.satellites) do
-    table.insert(pool, satellite)
-  end
-
-  if #pool == 0 then
-    return nil
-  end
-
-  return pool[love.math.random(1, #pool)]
-end
-
 local function triggerPlanetImpulse()
-  local target = pickPlanetImpulseTarget()
-  if not target then
+  if not runtime.orbiters then
     return false
   end
-
-  target.boostDurations = target.boostDurations or {}
-  table.insert(target.boostDurations, PLANET_IMPULSE_DURATION)
-  return true
-end
-
-local function spawnModifierRipple()
-  state.speedWaveRipples[#state.speedWaveRipples + 1] = {
-    age = 0,
-    life = SPEED_WAVE_RIPPLE_LIFETIME,
-  }
+  return runtime.orbiters:triggerPlanetImpulse()
 end
 
 local function speedWaveBoostFor(orbiter)
-  if state.speedWaveTimer <= 0 then
+  if not runtime.upgrades then
     return 0
   end
-  if not orbiter then
-    return 0
-  end
-  if orbiter.kind == "satellite" or orbiter.kind == "moon-satellite" then
-    return SPEED_WAVE_MULTIPLIER - 1
-  end
-  return 0
+  return runtime.upgrades:getSpeedWaveBoost(orbiter)
 end
 
 function stabilitySlowMultiplier()
-  if state.stability >= STABILITY.unstableThreshold then
-    return 1
+  if not runtime.upgrades then
+    if state.stability >= STABILITY.unstableThreshold then
+      return 1
+    end
+    local t = 1 - (state.stability / STABILITY.unstableThreshold)
+    return lerp(1, STABILITY.minSpeedMultiplier, smoothstep(t))
   end
-  local t = 1 - (state.stability / STABILITY.unstableThreshold)
-  return lerp(1, STABILITY.minSpeedMultiplier, smoothstep(t))
+  return runtime.upgrades:stabilitySlowMultiplier()
 end
 
 function stabilityRecoveryBoostMultiplier()
-  if state.stabilityBoostTimer <= 0 then
-    return 1
+  if not runtime.upgrades then
+    if state.stabilityBoostTimer <= 0 then
+      return 1
+    end
+    local t = clamp(state.stabilityBoostTimer / STABILITY.recoveryBoostDuration, 0, 1)
+    return lerp(1, STABILITY.recoveryBoostMultiplier, smoothstep(t))
   end
-  local t = clamp(state.stabilityBoostTimer / STABILITY.recoveryBoostDuration, 0, 1)
-  return lerp(1, STABILITY.recoveryBoostMultiplier, smoothstep(t))
+  return runtime.upgrades:stabilityRecoveryBoostMultiplier()
 end
 
 function blackHoleStabilitySpeedMultiplier()
-  return stabilitySlowMultiplier() * stabilityRecoveryBoostMultiplier()
+  if not runtime.upgrades then
+    return stabilitySlowMultiplier() * stabilityRecoveryBoostMultiplier()
+  end
+  return runtime.upgrades:blackHoleStabilitySpeedMultiplier()
 end
 
 function isBlackHoleUnstable()
-  return state.stability < STABILITY.unstableThreshold
+  if not runtime.upgrades then
+    return state.stability < STABILITY.unstableThreshold
+  end
+  return runtime.upgrades:isBlackHoleUnstable()
 end
 
 function onBlackHoleStabilityClick()
-  local wasStable = state.stability >= STABILITY.recoveryThreshold
-  local wasMax = state.stability >= 1
-  state.stability = clamp(state.stability + STABILITY.clickGain, 0, 1)
-  state.stabilityIdleTimer = 0
-  if (not wasStable) and state.stability >= STABILITY.recoveryThreshold then
-    state.stabilityBoostTimer = STABILITY.recoveryBoostDuration
-    spawnModifierRipple()
+  if not runtime.upgrades then
+    local wasStable = state.stability >= STABILITY.recoveryThreshold
+    local wasMax = state.stability >= 1
+    state.stability = clamp(state.stability + STABILITY.clickGain, 0, 1)
+    state.stabilityIdleTimer = 0
+    if (not wasStable) and state.stability >= STABILITY.recoveryThreshold then
+      state.stabilityBoostTimer = STABILITY.recoveryBoostDuration
+    end
+    if (not wasMax) and state.stability >= 1 then
+      state.stabilityMaxFxTimer = STABILITY.maxFxDuration
+    end
+    return
   end
-  if (not wasMax) and state.stability >= 1 then
-    state.stabilityMaxFxTimer = STABILITY.maxFxDuration
-    spawnModifierRipple()
-  end
-end
-
-local function triggerSpeedWave()
-  state.speedWaveTimer = SPEED_WAVE_DURATION
-  spawnModifierRipple()
-  local mx, my = love.mouse.getPosition()
-  state.speedWaveText = {
-    x = mx,
-    y = my,
-    age = 0,
-    life = SPEED_WAVE_TEXT_LIFETIME,
-  }
+  return runtime.upgrades:onBlackHoleStabilityClick()
 end
 
 local function buySpeedWave()
-  if state.speedWaveUnlocked then
+  if not runtime.upgrades then
     return false
   end
-  local cost = speedWaveCost()
-  if state.orbits < cost then
-    return false
-  end
-  state.orbits = state.orbits - cost
-  state.speedWaveUnlocked = true
-  state.planetClickCount = 0
-  if upgradeFx then
-    local voice = upgradeFx:clone()
-    voice:setVolume(0)
-    local duration = voice:getDuration("seconds") or 0
-    if duration > UPGRADE_FX_START_OFFSET_SECONDS then
-      voice:seek(UPGRADE_FX_START_OFFSET_SECONDS, "seconds")
-    end
-    voice:play()
-    upgradeFxInstances[#upgradeFxInstances + 1] = {source = voice, age = 0}
-    bgMusicDuckTimer = BG_MUSIC_DUCK_SECONDS
-  end
-  return true
+  return runtime.upgrades:buySpeedWave()
 end
 
 local function buySpeedClick()
-  if state.speedClickUnlocked then
+  if not runtime.upgrades then
     return false
   end
-  local cost = speedClickCost()
-  if state.orbits < cost then
-    return false
-  end
-  state.orbits = state.orbits - cost
-  state.speedClickUnlocked = true
-  if upgradeFx then
-    local voice = upgradeFx:clone()
-    voice:setVolume(0)
-    local duration = voice:getDuration("seconds") or 0
-    if duration > UPGRADE_FX_START_OFFSET_SECONDS then
-      voice:seek(UPGRADE_FX_START_OFFSET_SECONDS, "seconds")
-    end
-    voice:play()
-    upgradeFxInstances[#upgradeFxInstances + 1] = {source = voice, age = 0}
-    bgMusicDuckTimer = BG_MUSIC_DUCK_SECONDS
-  end
-  return true
+  return runtime.upgrades:buySpeedClick()
 end
 
 local function buyBlackHoleShader()
-  if state.blackHoleShaderUnlocked then
+  if not runtime.upgrades then
     return false
   end
-  local cost = blackHoleShaderCost()
-  if state.orbits < cost then
-    return false
-  end
-  state.orbits = state.orbits - cost
-  state.blackHoleShaderUnlocked = true
+  return runtime.upgrades:buyBlackHoleShader()
+end
+
+local function onUpgradePurchased()
   if upgradeFx then
     local voice = upgradeFx:clone()
     voice:setVolume(0)
@@ -1172,22 +956,89 @@ local function buyBlackHoleShader()
     upgradeFxInstances[#upgradeFxInstances + 1] = {source = voice, age = 0}
     bgMusicDuckTimer = BG_MUSIC_DUCK_SECONDS
   end
-  return true
 end
 
 local function onPlanetClicked()
-  state.planetBounceTime = PLANET_BOUNCE_DURATION
-  onBlackHoleStabilityClick()
-  if state.speedClickUnlocked then
-    triggerPlanetImpulse()
-  end
-  if not state.speedWaveUnlocked then
+  if not runtime.upgrades then
     return
   end
-  state.planetClickCount = state.planetClickCount + 1
-  if state.planetClickCount % SPEED_WAVE_CLICK_THRESHOLD == 0 then
-    triggerSpeedWave()
-  end
+  runtime.upgrades:onPlanetClicked()
+end
+
+local function initGameSystems()
+  runtime.modifiers = Systems.Modifier.new()
+
+  runtime.economy = Systems.Economy.new({
+    state = state,
+    modifiers = runtime.modifiers,
+    costs = {
+      moon = MOON_COST,
+      planet = PLANET_COST,
+      megaPlanet = MEGA_PLANET_COST,
+      satellite = SATELLITE_COST,
+      moonSatellite = MOON_SATELLITE_COST,
+      speedWave = SPEED_WAVE_COST,
+      speedClick = SPEED_CLICK_COST,
+      blackHoleShader = BLACK_HOLE_SHADER_COST,
+    },
+  })
+
+  runtime.progression = Systems.Progression.new({
+    state = state,
+    modifiers = runtime.modifiers,
+  })
+
+  runtime.upgrades = Systems.Upgrades.new({
+    state = state,
+    economy = runtime.economy,
+    modifiers = runtime.modifiers,
+    stability = STABILITY,
+    speedWaveDuration = SPEED_WAVE_DURATION,
+    speedWaveMultiplier = SPEED_WAVE_MULTIPLIER,
+    speedWaveClickThreshold = SPEED_WAVE_CLICK_THRESHOLD,
+    speedWaveRippleLifetime = SPEED_WAVE_RIPPLE_LIFETIME,
+    speedWaveTextLifetime = SPEED_WAVE_TEXT_LIFETIME,
+    planetBounceDuration = PLANET_BOUNCE_DURATION,
+    onUpgradePurchased = onUpgradePurchased,
+    onPlanetImpulse = function()
+      triggerPlanetImpulse()
+    end,
+    mousePositionProvider = function()
+      return love.mouse.getPosition()
+    end,
+  })
+
+  runtime.orbiters = Systems.Orbiters.new({
+    state = state,
+    economy = runtime.economy,
+    modifiers = runtime.modifiers,
+    orbitConfigs = ORBIT_CONFIGS,
+    bodyVisual = BODY_VISUAL,
+    twoPi = TWO_PI,
+    maxMoons = MAX_MOONS,
+    maxSatellites = MAX_SATELLITES,
+    impulseDuration = PLANET_IMPULSE_DURATION,
+    impulseTargetBoost = PLANET_IMPULSE_TARGET_BOOST,
+    impulseRiseRate = PLANET_IMPULSE_RISE_RATE,
+    impulseFallRate = PLANET_IMPULSE_FALL_RATE,
+    createOrbitalParams = createOrbitalParams,
+    updateOrbiterPosition = updateOrbiterPosition,
+    assignRenderOrder = assignRenderOrder,
+    getStabilitySpeedMultiplier = function()
+      return runtime.upgrades:blackHoleStabilitySpeedMultiplier()
+    end,
+    getTransientBoost = function(orbiter)
+      return runtime.upgrades:getSpeedWaveBoost(orbiter)
+    end,
+    onOrbitGainFx = spawnOrbitGainFx,
+    onOrbitsEarned = function(count)
+      if runtime.progression then
+        runtime.progression:onOrbitsEarned(count)
+      end
+    end,
+  })
+
+  runtime.progression:update()
 end
 
 local function drawBackground()
@@ -1833,7 +1684,7 @@ local function drawHud()
     y = y + lineH + math.floor(2 * uiScale)
   end
 
-  local function drawRow(btn, label, status, enabled, orbitCost)
+  local function drawRow(btn, label, status, enabled, orbitCost, statusStyle)
     btn.x = panelX + padX
     btn.y = y
     btn.w = panelW - padX * 2
@@ -1847,12 +1698,19 @@ local function drawHud()
     setColorScaled(palette.text, 1, alpha)
     drawText(label, btn.x + math.floor(8 * uiScale), btn.y + rowTextInsetY)
     if status and status ~= "" then
-      if orbitCost then
-        local sw = font:getWidth(status)
-        drawText(status, btn.x + btn.w - sw - math.floor(8 * uiScale), btn.y + rowTextInsetY)
+      local sw = font:getWidth(status)
+      local statusX = btn.x + btn.w - sw - math.floor(8 * uiScale)
+      if statusStyle == "rainbow-fast" then
+        local pulse = 0.5 + 0.5 * math.sin((state.time / 1.2) * TWO_PI)
+        local blend = smoothstep(pulse)
+        local r = lerp(swatch.bright[1], swatch.mid[1], blend)
+        local g = lerp(swatch.bright[2], swatch.mid[2], blend)
+        local b = lerp(swatch.bright[3], swatch.mid[3], blend)
+        setColorDirect(r, g, b, alpha)
+        drawText(status, statusX, btn.y + rowTextInsetY)
       else
-        local sw = font:getWidth(status)
-        drawText(status, btn.x + btn.w - sw - math.floor(8 * uiScale), btn.y + rowTextInsetY)
+        setColorScaled(palette.text, 1, alpha)
+        drawText(status, statusX, btn.y + rowTextInsetY)
       end
     end
     y = y + rowH + gap
@@ -1862,9 +1720,12 @@ local function drawHud()
   local megaPlanetBuyCost = megaPlanetCost()
   local planetBuyCost = planetCost()
   local moonBuyCost = moonCost()
+  local moonIsFree = moonBuyCost <= 0
+  local moonStatus = moonIsFree and "free" or tostring(moonBuyCost)
+  local moonStatusStyle = moonIsFree and "rainbow-fast" or nil
   local canBuyMegaPlanet = state.orbits >= megaPlanetBuyCost
   local canBuyPlanet = state.orbits >= planetBuyCost
-  local canBuyMoon = state.orbits >= moonBuyCost and #state.moons < MAX_MOONS
+  local canBuyMoon = #state.moons < MAX_MOONS and (moonIsFree or state.orbits >= moonBuyCost)
   local canBuySatellite = #state.satellites < MAX_SATELLITES and state.orbits >= satelliteCost()
   local satelliteStatus = tostring(satelliteCost())
   local speedWaveReady = state.speedWaveUnlocked or state.orbits >= speedWaveCost()
@@ -1916,7 +1777,7 @@ local function drawHud()
       },
     }
   end
-  local moonHovered = drawRow(ui.buyMoonBtn, "moon", tostring(moonBuyCost), canBuyMoon, true)
+  local moonHovered = drawRow(ui.buyMoonBtn, "moon", moonStatus, canBuyMoon, true, moonStatusStyle)
   if moonHovered then
     hoveredTooltipBtn = ui.buyMoonBtn
     hoveredTooltipLines = {
@@ -2021,11 +1882,13 @@ end
 function getOrbiterAction(orbiter)
   if orbiter.kind == "planet" or orbiter.kind == "mega-planet" then
     local cost = moonCost()
+    local firstMoonFree = cost <= 0
     return {
       action = "buy-moon",
       label = "moon",
-      price = tostring(cost),
-      enabled = state.orbits >= cost and #state.moons < MAX_MOONS,
+      price = firstMoonFree and "free" or tostring(cost),
+      priceStyle = firstMoonFree and "rainbow-fast" or nil,
+      enabled = #state.moons < MAX_MOONS and (firstMoonFree or state.orbits >= cost),
       tooltipLines = {
         {pre = "Adds a moon orbiting this planet.", hi = "", post = ""},
         {pre = "Moons can host ", hi = "satellites", post = "."},
@@ -2226,7 +2089,19 @@ function drawOrbiterTooltip()
   setColorScaled(palette.text, 1, btnAlpha)
   drawText(action.label, btnX + math.floor(8 * layout.uiScale), textY)
   local priceW = font:getWidth(action.price)
-  drawText(action.price, btnX + btnW - priceW - math.floor(8 * layout.uiScale), textY)
+  local priceX = btnX + btnW - priceW - math.floor(8 * layout.uiScale)
+  if action.priceStyle == "rainbow-fast" then
+    local pulse = 0.5 + 0.5 * math.sin((state.time / 1.2) * TWO_PI)
+    local blend = smoothstep(pulse)
+    local r = lerp(swatch.bright[1], swatch.mid[1], blend)
+    local g = lerp(swatch.bright[2], swatch.mid[2], blend)
+    local b = lerp(swatch.bright[3], swatch.mid[3], blend)
+    setColorDirect(r, g, b, btnAlpha)
+    drawText(action.price, priceX, textY)
+  else
+    setColorScaled(palette.text, 1, btnAlpha)
+    drawText(action.price, priceX, textY)
+  end
 
   if hovered then
     drawHoverTooltip(action.tooltipLines, btn, layout.uiScale, layout.lineH, true)
@@ -2552,6 +2427,7 @@ function love.load()
   initBackgroundMusic()
   initUpgradeFx()
   initClickFx()
+  initGameSystems()
 
   recomputeViewport()
 
@@ -2588,137 +2464,17 @@ function love.update(dt)
   updateUpgradeFx(dt)
   state.time = state.time + dt
   state.planetBounceTime = math.max(0, state.planetBounceTime - dt)
-  state.speedWaveTimer = math.max(0, state.speedWaveTimer - dt)
-  state.stabilityBoostTimer = math.max(0, state.stabilityBoostTimer - dt)
-  state.stabilityMaxFxTimer = math.max(0, state.stabilityMaxFxTimer - dt)
-  state.stabilityIdleTimer = state.stabilityIdleTimer + dt
-  if state.stabilityIdleTimer > STABILITY.idleSeconds then
-    state.stability = math.max(0, state.stability - STABILITY.drainPerSecond * dt)
+
+  if runtime.upgrades then
+    runtime.upgrades:update(dt)
   end
-  if isBlackHoleUnstable() then
-    state.stabilityWaveTimer = state.stabilityWaveTimer + dt
-    while state.stabilityWaveTimer >= STABILITY.waveInterval do
-      state.stabilityWaveTimer = state.stabilityWaveTimer - STABILITY.waveInterval
-      spawnModifierRipple()
-    end
-  else
-    state.stabilityWaveTimer = 0
+  if runtime.orbiters then
+    runtime.orbiters:update(dt)
+  end
+  if runtime.progression then
+    runtime.progression:update()
   end
   updateOrbitGainFx(dt)
-
-  local ripples = state.speedWaveRipples
-  for i = #ripples, 1, -1 do
-    local ripple = ripples[i]
-    ripple.age = ripple.age + dt
-    if ripple.age >= ripple.life then
-      table.remove(ripples, i)
-    end
-  end
-
-  if state.speedWaveText then
-    state.speedWaveText.age = state.speedWaveText.age + dt
-    if state.speedWaveText.age >= state.speedWaveText.life then
-      state.speedWaveText = nil
-    end
-  end
-
-  local stabilitySpeedMultiplier = blackHoleStabilitySpeedMultiplier()
-
-  for _, megaPlanet in ipairs(state.megaPlanets) do
-    local prev = megaPlanet.angle
-    updateOrbiterBoost(megaPlanet, dt)
-    local effectiveSpeed = megaPlanet.speed * (1 + megaPlanet.boost) * stabilitySpeedMultiplier
-    megaPlanet.angle = megaPlanet.angle + effectiveSpeed * dt
-
-    local prevTurns = math.floor(prev / TWO_PI)
-    local newTurns = math.floor(megaPlanet.angle / TWO_PI)
-    if newTurns > prevTurns then
-      local turnsGained = newTurns - prevTurns
-      state.orbits = state.orbits + turnsGained
-      megaPlanet.revolutions = megaPlanet.revolutions + turnsGained
-      spawnOrbitGainFx(megaPlanet.x, megaPlanet.y, turnsGained, BODY_VISUAL.megaPlanetRadius)
-    end
-
-    updateOrbiterPosition(megaPlanet)
-  end
-
-  for _, planet in ipairs(state.planets) do
-    local prev = planet.angle
-    updateOrbiterBoost(planet, dt)
-    local effectiveSpeed = planet.speed * (1 + planet.boost) * stabilitySpeedMultiplier
-    planet.angle = planet.angle + effectiveSpeed * dt
-
-    local prevTurns = math.floor(prev / TWO_PI)
-    local newTurns = math.floor(planet.angle / TWO_PI)
-    if newTurns > prevTurns then
-      local turnsGained = newTurns - prevTurns
-      state.orbits = state.orbits + turnsGained
-      planet.revolutions = planet.revolutions + turnsGained
-      spawnOrbitGainFx(planet.x, planet.y, turnsGained, BODY_VISUAL.orbitPlanetRadius)
-    end
-
-    updateOrbiterPosition(planet)
-  end
-
-  for _, moon in ipairs(state.moons) do
-    local prev = moon.angle
-    updateOrbiterBoost(moon, dt)
-    local effectiveSpeed = moon.speed * (1 + moon.boost) * stabilitySpeedMultiplier
-
-    moon.angle = moon.angle + effectiveSpeed * dt
-
-    local prevTurns = math.floor(prev / TWO_PI)
-    local newTurns = math.floor(moon.angle / TWO_PI)
-    if newTurns > prevTurns then
-      local turnsGained = newTurns - prevTurns
-      state.orbits = state.orbits + turnsGained
-      moon.revolutions = moon.revolutions + turnsGained
-      spawnOrbitGainFx(moon.x, moon.y, turnsGained, BODY_VISUAL.moonRadius)
-    end
-
-    updateOrbiterPosition(moon)
-
-    local childSatellites = moon.childSatellites or {}
-    for _, child in ipairs(childSatellites) do
-      local prev = child.angle
-      updateOrbiterBoost(child, dt)
-      local totalBoost = child.boost + speedWaveBoostFor(child)
-      local effectiveSpeed = child.speed * (1 + totalBoost) * stabilitySpeedMultiplier
-      child.angle = child.angle + effectiveSpeed * dt
-      child.parentOrbiter = moon
-      child.parentMoon = moon
-      updateOrbiterPosition(child)
-
-      local prevTurns = math.floor(prev / TWO_PI)
-      local newTurns = math.floor(child.angle / TWO_PI)
-      if newTurns > prevTurns then
-        local turnsGained = newTurns - prevTurns
-        state.orbits = state.orbits + turnsGained
-        child.revolutions = child.revolutions + turnsGained
-        spawnOrbitGainFx(child.x, child.y, turnsGained, BODY_VISUAL.moonChildSatelliteRadius)
-      end
-    end
-  end
-
-  for _, satellite in ipairs(state.satellites) do
-    local prev = satellite.angle
-    updateOrbiterBoost(satellite, dt)
-    local totalBoost = satellite.boost + speedWaveBoostFor(satellite)
-    local effectiveSpeed = satellite.speed * (1 + totalBoost) * stabilitySpeedMultiplier
-
-    satellite.angle = satellite.angle + effectiveSpeed * dt
-
-    local prevTurns = math.floor(prev / TWO_PI)
-    local newTurns = math.floor(satellite.angle / TWO_PI)
-    if newTurns > prevTurns then
-      local turnsGained = newTurns - prevTurns
-      state.orbits = state.orbits + turnsGained
-      satellite.revolutions = satellite.revolutions + turnsGained
-      spawnOrbitGainFx(satellite.x, satellite.y, turnsGained, BODY_VISUAL.satelliteRadius)
-    end
-
-    updateOrbiterPosition(satellite)
-  end
 end
 
 function love.mousepressed(x, y, button)
