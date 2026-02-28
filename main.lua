@@ -104,6 +104,7 @@ local SLICE = {
   rewardPerfectWeight = 1.5,
   rewardHighRiskSecondsWeight = 2,
   minimumReward = 1,
+  rewardFluxWeight = 0.9,
   shardSaveFile = "collapse_shards.sav",
   singleMoonMode = true,
 }
@@ -112,6 +113,40 @@ GAMEPLAY.rpmCollapseThreshold = SLICE.collapseRpm
 GAMEPLAY.rpmInstabilityStartRatio = SLICE.dangerousRpm / SLICE.collapseRpm
 Systems.MoonTiming.config.perfectWindow = SLICE.perfectWindow
 Systems.MoonTiming.config.goodWindow = SLICE.goodWindow
+
+local RUN_PRESSURE = {
+  instability = {
+    start = 0,
+    max = 100,
+    passiveBasePerSecond = 2.5,
+    passiveRpmFactor = 0.06,
+    onPerfect = -8,
+    onGood = -3,
+    onMiss = 7,
+    stressStartRatio = 0.30,
+    meterRiseRate = 8.5,
+    meterFallRate = 12.0,
+    softTickSeconds = 0.18,
+    spikeFlashSeconds = 0.22,
+    shakeMax = 3.8,
+    waveIntervalStart = 0.90,
+    waveIntervalEnd = 0.34,
+    waveLife = 0.90,
+    waveWidthStart = 0.016,
+    waveWidthEnd = 0.078,
+    waveRadialStrength = 0.041,
+    waveSwirlStrength = 0.0012,
+  },
+  flux = {
+    name = "Flux",
+    gainPulseSeconds = 0.24,
+    bands = {
+      {threshold = 80, interval = 0.7, label = "80+"},
+      {threshold = 60, interval = 1.2, label = "60+"},
+      {threshold = 40, interval = 2.0, label = "40+"},
+    },
+  },
+}
 
 local ECONOMY = {
   speedWaveCost = 25,
@@ -353,15 +388,28 @@ function createState(opts)
     tempBurstRpm = 0,
     temporaryRpm = 0,
     currentRpm = 0,
+    instability = RUN_PRESSURE.instability.start,
+    instabilityDisplay = RUN_PRESSURE.instability.start,
+    instabilityMax = RUN_PRESSURE.instability.max,
+    maxInstabilityReached = RUN_PRESSURE.instability.start,
+    instabilitySoftTickTimer = 0,
+    instabilitySpikeTimer = 0,
     rpmLimitTempFill = 0,
     rpmLimitFill = 0,
     resonance = 0,
     longestResonance = 0,
     maxResonance = SLICE.maxResonance,
     maxRpmReached = SLICE.baseMoonRpm,
+    flux = 0,
+    fluxProgress = 0,
+    fluxBandThreshold = 0,
+    fluxGainPulseTimer = 0,
     perfectHits = 0,
     goodHits = 0,
     secondsAbove70rpm = 0,
+    secondsAbove40rpm = 0,
+    secondsAbove60rpm = 0,
+    secondsAbove80rpm = 0,
     shardsGainedThisRun = 0,
     totalShards = totalShards,
     timingPopups = {},
@@ -532,6 +580,30 @@ end
 
 local function dangerBlendForRpm(rpm)
   return clamp(((rpm or 0) - SLICE.calmRpm) / math.max(1, SLICE.collapseRpm - SLICE.calmRpm), 0, 1)
+end
+
+local function instabilityRatio()
+  local maxValue = state.instabilityMax or RUN_PRESSURE.instability.max
+  return clamp((state.instability or 0) / math.max(1, maxValue), 0, 1)
+end
+
+local function instabilityStressBlend()
+  local startRatio = RUN_PRESSURE.instability.stressStartRatio
+  return clamp((instabilityRatio() - startRatio) / math.max(0.001, 1 - startRatio), 0, 1)
+end
+
+local function instabilityTier()
+  local ratio = instabilityRatio()
+  if ratio >= 0.85 then
+    return 3
+  end
+  if ratio >= 0.60 then
+    return 2
+  end
+  if ratio >= 0.30 then
+    return 1
+  end
+  return 0
 end
 
 local function pointInRect(px, py, rect)
@@ -1189,11 +1261,100 @@ local function updateTimingFeedback(dt)
   state.hitTrailTimer = math.max(0, (state.hitTrailTimer or 0) - dt)
   state.missFlashTimer = math.max(0, (state.missFlashTimer or 0) - dt)
   state.redlineFlashTimer = math.max(0, (state.redlineFlashTimer or 0) - dt)
+  state.instabilitySoftTickTimer = math.max(0, (state.instabilitySoftTickTimer or 0) - dt)
+  state.instabilitySpikeTimer = math.max(0, (state.instabilitySpikeTimer or 0) - dt)
+  state.fluxGainPulseTimer = math.max(0, (state.fluxGainPulseTimer or 0) - dt)
 end
 
 local function resonanceMultiplier(scalePerPoint)
   local resonance = clamp(state.resonance or 0, 0, state.maxResonance or SLICE.maxResonance)
   return 1 + resonance * scalePerPoint
+end
+
+local function clampInstability(value)
+  local maxValue = state.instabilityMax or RUN_PRESSURE.instability.max
+  return clamp(value, 0, maxValue)
+end
+
+local function applyInstabilityDelta(delta, feedback)
+  if not delta or delta == 0 then
+    return
+  end
+  local before = clampInstability(state.instability or 0)
+  local after = clampInstability(before + delta)
+  if after == before then
+    return
+  end
+
+  state.instability = after
+  state.maxInstabilityReached = math.max(state.maxInstabilityReached or 0, after)
+
+  if feedback == "soft" then
+    state.instabilitySoftTickTimer = math.max(
+      state.instabilitySoftTickTimer or 0,
+      RUN_PRESSURE.instability.softTickSeconds
+    )
+  elseif feedback == "spike" then
+    state.instabilitySpikeTimer = math.max(
+      state.instabilitySpikeTimer or 0,
+      RUN_PRESSURE.instability.spikeFlashSeconds
+    )
+  end
+
+  if after >= (state.instabilityMax or RUN_PRESSURE.instability.max) then
+    triggerInstabilityCollapse()
+  end
+end
+
+local function passiveInstabilityGainPerSecond()
+  local rpm = state.currentRpm or 0
+  return RUN_PRESSURE.instability.passiveBasePerSecond + rpm * RUN_PRESSURE.instability.passiveRpmFactor
+end
+
+local function updatePassiveInstability(dt)
+  applyInstabilityDelta(passiveInstabilityGainPerSecond() * dt, nil)
+end
+
+local function activeFluxBand(rpm)
+  local bands = RUN_PRESSURE.flux.bands
+  for i = 1, #bands do
+    local band = bands[i]
+    if rpm >= band.threshold then
+      return band
+    end
+  end
+  return nil
+end
+
+local function updateFluxBandProgress(dt)
+  local rpm = state.currentRpm or 0
+  if rpm >= 40 then
+    state.secondsAbove40rpm = (state.secondsAbove40rpm or 0) + dt
+  end
+  if rpm >= 60 then
+    state.secondsAbove60rpm = (state.secondsAbove60rpm or 0) + dt
+  end
+  if rpm >= 80 then
+    state.secondsAbove80rpm = (state.secondsAbove80rpm or 0) + dt
+  end
+
+  local band = activeFluxBand(rpm)
+  if not band then
+    state.fluxBandThreshold = 0
+    state.fluxProgress = 0
+    return
+  end
+
+  state.fluxBandThreshold = band.threshold
+  state.fluxProgress = (state.fluxProgress or 0) + dt / band.interval
+  local gained = math.floor(state.fluxProgress)
+  if gained <= 0 then
+    return
+  end
+
+  state.flux = math.max(0, math.floor((state.flux or 0) + gained))
+  state.fluxProgress = state.fluxProgress - gained
+  state.fluxGainPulseTimer = math.max(state.fluxGainPulseTimer or 0, RUN_PRESSURE.flux.gainPulseSeconds)
 end
 
 local function ensureSingleMoonExists()
@@ -1230,9 +1391,11 @@ local function applyTimingOutcome(moon, outcome)
     if result == "perfect" then
       state.resonance = clamp((state.resonance or 0) + SLICE.perfectResonanceGain, 0, state.maxResonance)
       state.perfectHits = (state.perfectHits or 0) + 1
+      applyInstabilityDelta(RUN_PRESSURE.instability.onPerfect, "soft")
     else
       state.resonance = clamp((state.resonance or 0) + SLICE.goodResonanceGain, 0, state.maxResonance)
       state.goodHits = (state.goodHits or 0) + 1
+      applyInstabilityDelta(RUN_PRESSURE.instability.onGood, "soft")
     end
     state.longestResonance = math.max(state.longestResonance or 0, state.resonance or 0)
 
@@ -1280,6 +1443,7 @@ local function applyTimingOutcome(moon, outcome)
 
   local hadResonance = (state.resonance or 0) > 0
   state.resonance = 0
+  applyInstabilityDelta(RUN_PRESSURE.instability.onMiss, "spike")
   state.missFlashTimer = 0.13
   spawnTimingPopup(popupX, popupY, popupZ, style.label, style.color, 0.55, 14)
   if hadResonance then
@@ -1309,9 +1473,6 @@ function tryTimedSingleMoonBoost()
   local success = applyTimingOutcome(moon, outcome)
   state.temporaryRpm, state.currentRpm = computeRpmBreakdown()
   state.maxRpmReached = math.max(state.maxRpmReached or 0, state.currentRpm or 0)
-  if (state.currentRpm or 0) >= GAMEPLAY.rpmCollapseThreshold then
-    triggerRpmCollapse()
-  end
   return success, outcome.result or "miss"
 end
 
@@ -1368,20 +1529,30 @@ spawnGravityWaveRipple = function(config)
   }
 end
 
-local function rpmInstabilityPressure()
+local function smoothInstabilityDisplay(current, target, dt)
+  local rise = RUN_PRESSURE.instability.meterRiseRate
+  local fall = RUN_PRESSURE.instability.meterFallRate
+  local rate = target > current and rise or fall
+  local blend = 1 - math.exp(-rate * dt)
+  return current + (target - current) * blend
+end
+
+local function instabilityEffectPressure()
   if state.gameOver then
     return 0
   end
   if state.collapseSequenceActive then
     return 1
   end
-  local startRatio = GAMEPLAY.rpmInstabilityStartRatio
-  local ratio = clamp((state.currentRpm or 0) / GAMEPLAY.rpmCollapseThreshold, 0, 1)
-  return clamp((ratio - startRatio) / math.max(0.001, 1 - startRatio), 0, 1)
+  return instabilityStressBlend()
 end
 
 local function updateInstabilityEffects(dt)
-  local pressure = rpmInstabilityPressure()
+  local target = clampInstability(state.instability or 0)
+  local current = state.instabilityDisplay or target
+  state.instabilityDisplay = clampInstability(smoothInstabilityDisplay(current, target, dt))
+
+  local pressure = instabilityEffectPressure()
   if pressure <= 0 then
     state.instabilityWaveTimer = 0
     state.screenShakeX = 0
@@ -1389,7 +1560,7 @@ local function updateInstabilityEffects(dt)
     return
   end
 
-  local amp = GAMEPLAY.rpmInstabilityShakeMax * pressure * pressure
+  local amp = RUN_PRESSURE.instability.shakeMax * pressure * pressure
   state.screenShakeX = math.sin(state.time * 31) * amp
   state.screenShakeY = math.cos(state.time * 27) * amp * 0.62
 
@@ -1399,32 +1570,33 @@ local function updateInstabilityEffects(dt)
   end
 
   spawnGravityWaveRipple({
-    life = GAMEPLAY.rpmInstabilityWaveLife,
-    widthStart = GAMEPLAY.rpmInstabilityWaveWidthStart,
-    widthEnd = GAMEPLAY.rpmInstabilityWaveWidthEnd,
-    radialStrength = GAMEPLAY.rpmInstabilityWaveRadialStrength,
-    swirlStrength = GAMEPLAY.rpmInstabilityWaveSwirlStrength,
+    life = RUN_PRESSURE.instability.waveLife,
+    widthStart = RUN_PRESSURE.instability.waveWidthStart,
+    widthEnd = RUN_PRESSURE.instability.waveWidthEnd,
+    radialStrength = RUN_PRESSURE.instability.waveRadialStrength * pressure,
+    swirlStrength = RUN_PRESSURE.instability.waveSwirlStrength * pressure,
     endPadding = GAMEPLAY.speedWaveRippleEndPadding,
     startRadiusScale = 1.05,
   })
 
   state.instabilityWaveTimer = lerp(
-    GAMEPLAY.rpmInstabilityWaveIntervalStart,
-    GAMEPLAY.rpmInstabilityWaveIntervalEnd,
+    RUN_PRESSURE.instability.waveIntervalStart,
+    RUN_PRESSURE.instability.waveIntervalEnd,
     pressure
   )
 end
 
-function triggerRpmCollapse()
+function triggerInstabilityCollapse()
   if state.gameOver or state.collapseSequenceActive then
     return
   end
   state.collapseSequenceActive = true
-  state.collapseTimer = SLICE.collapseFreezeSeconds
+  state.collapseTimer = GAMEPLAY.rpmCollapseEndDelay
   state.collapseFreezeTimer = SLICE.collapseFreezeSeconds
   state.redlineFlashTimer = 0.24
-  state.rpmLimitTempFill = clamp((state.temporaryRpm or 0) / GAMEPLAY.rpmCollapseThreshold, 0, 1)
-  state.rpmLimitFill = 1
+  state.instability = state.instabilityMax or RUN_PRESSURE.instability.max
+  state.maxInstabilityReached = math.max(state.maxInstabilityReached or 0, state.instability)
+  state.instabilitySpikeTimer = math.max(state.instabilitySpikeTimer or 0, RUN_PRESSURE.instability.spikeFlashSeconds)
   state.selectedOrbiter = nil
   state.selectedLightSource = false
   state.instabilityWaveTimer = 0
@@ -1449,16 +1621,30 @@ function triggerRpmCollapse()
   moon.breakAccel = 54
   moon.boostDurations = {}
   moon.boost = 0
-  spawnTimingPopup(moon.x, moon.y - BODY_VISUAL.moonRadius * 2.5, moon.z or 0, "Collapse", TIMING_OUTCOME_STYLE.miss.color, 0.62, 8)
+  spawnTimingPopup(
+    moon.x,
+    moon.y - BODY_VISUAL.moonRadius * 2.5,
+    moon.z or 0,
+    "Instability Max",
+    TIMING_OUTCOME_STYLE.miss.color,
+    0.62,
+    8
+  )
+end
+
+function triggerRpmCollapse()
+  triggerInstabilityCollapse()
 end
 
 local function calculateCollapseShardReward()
   local maxRpm = state.maxRpmReached or 0
   local perfectHits = state.perfectHits or 0
   local highRiskSeconds = state.secondsAbove70rpm or 0
+  local flux = state.flux or 0
   local raw = maxRpm * SLICE.rewardRpmWeight
     + perfectHits * SLICE.rewardPerfectWeight
     + highRiskSeconds * SLICE.rewardHighRiskSecondsWeight
+    + flux * SLICE.rewardFluxWeight
   return math.max(SLICE.minimumReward, math.floor(raw))
 end
 
@@ -2001,22 +2187,24 @@ local function drawPlanet()
   local t = 1 - clamp(state.planetBounceTime / GAMEPLAY.planetBounceDuration, 0, 1)
   local kick = math.sin(t * math.pi)
   local danger = dangerBlendForRpm(state.currentRpm or 0)
-  local pulse = 0.5 + 0.5 * math.sin(state.time * (2.6 + danger * 4.8))
+  local stress = instabilityStressBlend()
+  local pulse = 0.5 + 0.5 * math.sin(state.time * (2.6 + danger * 4.8 + stress * 4.6))
   local pulseMix = smoothstep(pulse)
-  local bounceScale = 1 + kick * 0.14 * (1 - t) + danger * (0.02 + pulseMix * 0.05)
+  local bounceScale = 1 + kick * 0.14 * (1 - t) + danger * (0.02 + pulseMix * 0.05) + stress * (0.01 + pulseMix * 0.03)
   local px, py, projScale = projectWorldPoint(cx, cy, 0)
   local pr = math.max(3, BODY_VISUAL.planetRadius * bounceScale * projScale)
 
   setColorDirect(0, 0, 0, 1)
   love.graphics.circle("fill", px, py, pr, 44)
-  if danger > 0 then
+  if danger > 0 or stress > 0 then
+    local tension = clamp(danger * 0.6 + stress, 0, 1)
     setColorDirect(
-      lerp(swatch.mid[1], swatch.bright[1], danger),
-      lerp(swatch.mid[2], swatch.bright[2], danger),
-      lerp(swatch.mid[3], swatch.bright[3], danger),
-      0.16 + 0.24 * pulseMix * danger
+      lerp(swatch.mid[1], swatch.brightest[1], tension),
+      lerp(swatch.mid[2], swatch.bright[2], tension),
+      lerp(swatch.mid[3], swatch.bright[3], tension),
+      0.10 + (0.18 + 0.24 * pulseMix) * tension
     )
-    love.graphics.circle("line", px, py, pr + 4 + 6 * danger, 44)
+    love.graphics.circle("line", px, py, pr + 4 + 6 * danger + 7 * stress, 44)
   end
   state.planetVisualRadius = pr * zoom
 end
@@ -2446,47 +2634,106 @@ function drawSingleMoonTimingDial(centerX, topY, uiScale)
   return radius * 2 + math.floor(6 * uiScale)
 end
 
-function drawRpmLimitBar(centerX, topY, uiScale)
-  local barW = math.max(80, math.floor(GAMEPLAY.rpmBarWidth * uiScale + 0.5))
-  local barH = math.max(6, math.floor(GAMEPLAY.rpmBarHeight * uiScale + 0.5))
-  local barX = math.floor(centerX - barW * 0.5)
-  local barY = math.floor(topY)
-  local fill = clamp(state.rpmLimitFill or 0, 0, 1)
-  local tempFill = clamp(state.rpmLimitTempFill or 0, 0, 1)
-  local tempVisibleFill = clamp(math.min(tempFill, fill), 0, fill)
-  local danger = dangerBlendForRpm(state.currentRpm or 0)
-  local pulse = 0.5 + 0.5 * math.sin(state.time * (8 + danger * 8))
-  local pulseMix = smoothstep(pulse)
-
-  local borderR = lerp(swatch.bright[1], swatch.brightest[1], danger)
-  local borderG = lerp(swatch.bright[2], swatch.mid[2], danger)
-  local borderB = lerp(swatch.bright[3], swatch.mid[3], danger)
-  setColorDirect(borderR, borderG, borderB, 0.82 + 0.16 * pulseMix * danger)
-  love.graphics.rectangle("line", barX, barY, barW, barH)
-
-  if fill > 0 then
-    local innerPad = 1
-    local innerW = math.max(1, barW - innerPad * 2)
-    local innerH = math.max(1, barH - innerPad * 2)
-    local fillW = math.floor(innerW * fill + 0.5)
-    local tempFillW = math.min(fillW, math.floor(innerW * tempVisibleFill + 0.5))
-    local baseFillW = math.max(0, fillW - tempFillW)
-    if baseFillW > 0 then
-      setColorDirect(lerp(0.58, 0.92, danger), lerp(0.18, 0.22, danger), lerp(0.26, 0.24, danger), 0.55)
-      love.graphics.rectangle("fill", barX + innerPad, barY + innerPad, baseFillW, innerH)
-    end
-    if tempFillW > 0 then
-      setColorDirect(1, 0.48 + 0.10 * pulseMix, 0.28, 0.86)
-      love.graphics.rectangle("fill", barX + innerPad + baseFillW, barY + innerPad, tempFillW, innerH)
-    end
+local function drawFluxBandMarkers(centerX, y, uiScale)
+  local font = love.graphics.getFont()
+  local labels = {"40+", "60+", "80+"}
+  local thresholds = {40, 60, 80}
+  local gap = math.max(8, math.floor(18 * uiScale))
+  local totalWidth = -gap
+  for i = 1, #labels do
+    totalWidth = totalWidth + font:getWidth(labels[i]) + gap
   end
 
-  local thresholdLabel = tostring(math.floor(SLICE.collapseRpm))
-  local font = love.graphics.getFont()
-  setColorScaled(swatch.brightest, 1, 0.56)
-  drawText(thresholdLabel, barX + barW - font:getWidth(thresholdLabel), barY - font:getHeight() - math.floor(1 * uiScale))
+  local x = math.floor(centerX - totalWidth * 0.5)
+  local activeThreshold = state.fluxBandThreshold or 0
+  local pulse = smoothstep(0.5 + 0.5 * math.sin(state.time * 8))
+  for i = 1, #labels do
+    local label = labels[i]
+    local threshold = thresholds[i]
+    local unlocked = (state.currentRpm or 0) >= threshold
+    local active = activeThreshold == threshold
+    local alpha = unlocked and 0.66 or 0.34
+    if active then
+      alpha = 0.84 + 0.14 * pulse
+    end
+    setColorDirect(
+      lerp(swatch.mid[1], swatch.brightest[1], active and 0.82 or 0.36),
+      lerp(swatch.mid[2], swatch.brightest[2], active and 0.82 or 0.36),
+      lerp(swatch.mid[3], swatch.brightest[3], active and 0.82 or 0.36),
+      alpha
+    )
+    drawText(label, x, y)
+    x = x + font:getWidth(label) + gap
+  end
+end
 
-  return barH + math.floor(6 * uiScale)
+local function drawInstabilityMeter(uiScale)
+  local font = love.graphics.getFont()
+  local lineH = math.floor(font:getHeight())
+  local pad = math.floor(16 * uiScale)
+  local meterW = math.max(12, math.floor(14 * uiScale))
+  local meterH = math.max(110, math.floor(208 * uiScale))
+  local rightX = offsetX + WORLD.gameW * scale - pad
+  local topY = offsetY + math.floor(10 * uiScale)
+  local meterX = rightX - meterW
+  local meterY = topY + lineH + math.floor(4 * uiScale)
+  local maxValue = state.instabilityMax or RUN_PRESSURE.instability.max
+  local displayValue = clamp(state.instabilityDisplay or 0, 0, maxValue)
+  local liveValue = clamp(state.instability or 0, 0, maxValue)
+  local ratio = clamp(displayValue / math.max(1, maxValue), 0, 1)
+  local stress = instabilityStressBlend()
+  local tier = instabilityTier()
+  local pulse = smoothstep(0.5 + 0.5 * math.sin(state.time * (2.2 + tier * 2.4)))
+
+  local label = string.format("Instability %d / %d", math.floor(liveValue + 0.5), maxValue)
+  setColorDirect(
+    lerp(swatch.brightest[1], 1, stress),
+    lerp(swatch.brightest[2], 0.42, stress),
+    lerp(swatch.brightest[3], 0.32, stress),
+    0.92
+  )
+  drawText(label, rightX - font:getWidth(label), topY)
+
+  setColorScaled(swatch.darkest, 1, 0.92)
+  love.graphics.rectangle("fill", meterX, meterY, meterW, meterH)
+
+  local fillPad = 1
+  local fillW = math.max(1, meterW - fillPad * 2)
+  local fillH = math.max(0, math.floor((meterH - fillPad * 2) * ratio + 0.5))
+  if fillH > 0 then
+    local fillY = meterY + meterH - fillPad - fillH
+    local fillR = lerp(swatch.dim[1], 1, ratio)
+    local fillG = lerp(swatch.dim[2], 0.36, ratio)
+    local fillB = lerp(swatch.mid[3], 0.24, ratio)
+    setColorDirect(fillR, fillG, fillB, lerp(0.34, 0.92, ratio))
+    love.graphics.rectangle("fill", meterX + fillPad, fillY, fillW, fillH)
+  end
+
+  setColorDirect(
+    lerp(swatch.bright[1], swatch.brightest[1], stress),
+    lerp(swatch.bright[2], swatch.mid[2], stress),
+    lerp(swatch.bright[3], swatch.mid[3], stress),
+    0.62 + 0.24 * stress
+  )
+  love.graphics.rectangle("line", meterX, meterY, meterW, meterH)
+
+  if stress > 0 then
+    local glowAlpha = stress * (0.12 + 0.20 * pulse)
+    setColorDirect(1, 0.36 + 0.20 * pulse, 0.28, glowAlpha)
+    love.graphics.rectangle("line", meterX - 2, meterY - 2, meterW + 4, meterH + 4)
+  end
+
+  local softTick = clamp((state.instabilitySoftTickTimer or 0) / RUN_PRESSURE.instability.softTickSeconds, 0, 1)
+  if softTick > 0 then
+    setColorDirect(0.94, 0.98, 1, 0.20 * softTick)
+    love.graphics.rectangle("line", meterX - 3, meterY - 3, meterW + 6, meterH + 6)
+  end
+
+  local spike = clamp((state.instabilitySpikeTimer or 0) / RUN_PRESSURE.instability.spikeFlashSeconds, 0, 1)
+  if spike > 0 then
+    setColorDirect(1, 0.30, 0.24, 0.34 * spike)
+    love.graphics.rectangle("fill", meterX - 1, meterY, meterW + 2, meterH)
+  end
 end
 
 local function drawHud()
@@ -2494,72 +2741,68 @@ local function drawHud()
   local lineH = math.floor(font:getHeight())
   local uiScale = scale >= 1 and scale or 1
   local centerX = offsetX + (WORLD.gameW * scale) * 0.5
-  local topY = offsetY + math.floor(6 * uiScale)
+  local topY = offsetY + math.floor(8 * uiScale)
   local totalRpm = state.currentRpm or 0
   local danger = dangerBlendForRpm(totalRpm)
   local tier = dangerTierForRpm(totalRpm)
-  local pulse = 0.5 + 0.5 * math.sin(state.time * (6 + tier * 3))
-  local pulseMix = smoothstep(pulse)
+  local pulse = smoothstep(0.5 + 0.5 * math.sin(state.time * (6 + tier * 2.2)))
+  local fluxPulse = clamp((state.fluxGainPulseTimer or 0) / RUN_PRESSURE.flux.gainPulseSeconds, 0, 1)
 
   local counterFont = getOrbitCounterFont()
   local rpmText = string.format("%.1f RPM", totalRpm)
-  local rpmTextW = counterFont:getWidth(rpmText)
   local rpmY = topY
   love.graphics.setFont(counterFont)
-  setColorDirect(lerp(swatch.brightest[1], 1, danger), lerp(swatch.brightest[2], 0.42, danger), lerp(swatch.brightest[3], 0.33, danger), 0.96)
-  drawText(rpmText, centerX - rpmTextW * 0.5, rpmY)
+  setColorDirect(
+    lerp(swatch.brightest[1], 1, danger),
+    lerp(swatch.brightest[2], 0.42, danger),
+    lerp(swatch.brightest[3], 0.33, danger),
+    0.97
+  )
+  drawText(rpmText, centerX - counterFont:getWidth(rpmText) * 0.5, rpmY)
 
   love.graphics.setFont(font)
-  local baseText = string.format("base %.1f + perm %.1f + burst %.1f", state.baseRpm or 0, state.permanentRpmBonus or 0, state.tempBurstRpm or 0)
-  setColorScaled(palette.text, 1, 0.84)
-  drawText(baseText, centerX - font:getWidth(baseText) * 0.5, rpmY + counterFont:getHeight() - math.floor(2 * uiScale))
-
-  local resonanceText = string.format("resonance %.1f / %d", state.resonance or 0, state.maxResonance or SLICE.maxResonance)
-  setColorDirect(
-    lerp(swatch.bright[1], swatch.brightest[1], pulseMix),
-    lerp(swatch.bright[2], swatch.brightest[2], pulseMix),
-    lerp(swatch.bright[3], swatch.brightest[3], pulseMix),
-    0.86 + 0.10 * danger
+  local breakdownText = string.format(
+    "%.1f base + %.1f perm + %.1f burst",
+    state.baseRpm or 0,
+    state.permanentRpmBonus or 0,
+    state.tempBurstRpm or 0
   )
-  drawText(resonanceText, centerX - font:getWidth(resonanceText) * 0.5, rpmY + counterFont:getHeight() + lineH - math.floor(2 * uiScale))
+  setColorScaled(palette.text, 1, 0.80)
+  drawText(
+    breakdownText,
+    centerX - font:getWidth(breakdownText) * 0.5,
+    rpmY + counterFont:getHeight() - math.floor(2 * uiScale)
+  )
 
-  local barTopY = rpmY + counterFont:getHeight() + lineH * 2 + math.floor(2 * uiScale)
-  local barSpacing = drawRpmLimitBar(centerX, barTopY, uiScale)
-  local dialSpacing = drawSingleMoonTimingDial(centerX, barTopY + barSpacing, uiScale)
+  local bandY = rpmY + counterFont:getHeight() + lineH - math.floor(1 * uiScale)
+  drawFluxBandMarkers(centerX, bandY, uiScale)
 
-  local statsX = math.floor(offsetX + 14 * uiScale)
-  local statsY = math.floor(topY + math.max(0, dialSpacing - lineH))
-  local statsLines = {
-    string.format("perfect %d", state.perfectHits or 0),
-    string.format("good %d", state.goodHits or 0),
-    string.format("max rpm %.1f", state.maxRpmReached or 0),
-    string.format("longest resonance %.1f", state.longestResonance or 0),
-    string.format("time above 70 %.1fs", state.secondsAbove70rpm or 0),
-    string.format("Collapse Shards %d", state.totalShards or 0),
-  }
+  local resonanceText = string.format("Resonance %.1f", state.resonance or 0)
+  local fluxText = string.format("%s: %d", RUN_PRESSURE.flux.name, state.flux or 0)
+  local momentumText = resonanceText .. "   " .. fluxText
+  setColorDirect(
+    lerp(swatch.bright[1], swatch.brightest[1], pulse * 0.55 + fluxPulse * 0.45),
+    lerp(swatch.bright[2], swatch.brightest[2], pulse * 0.55 + fluxPulse * 0.45),
+    lerp(swatch.bright[3], swatch.brightest[3], pulse * 0.55 + fluxPulse * 0.45),
+    0.74 + 0.20 * fluxPulse
+  )
+  drawText(momentumText, centerX - font:getWidth(momentumText) * 0.5, bandY + lineH)
 
-  setColorScaled(swatch.darkest, 1, 0.84)
-  local panelW = 292 * uiScale
-  local panelH = (lineH + 2 * uiScale) * #statsLines + 10 * uiScale
-  love.graphics.rectangle("fill", statsX - 6 * uiScale, statsY - 4 * uiScale, panelW, panelH)
-  setColorScaled(swatch.brightest, 1, 0.72)
-  love.graphics.rectangle("line", statsX - 6 * uiScale, statsY - 4 * uiScale, panelW, panelH)
-  for i = 1, #statsLines do
-    setColorScaled(palette.text, 1, 0.84 + (i == 6 and 0.10 or 0))
-    drawText(statsLines[i], statsX, statsY + (i - 1) * (lineH + math.floor(2 * uiScale)))
-  end
+  local dialTopY = bandY + lineH * 2 + math.floor(5 * uiScale)
+  drawSingleMoonTimingDial(centerX, dialTopY, uiScale)
+  drawInstabilityMeter(uiScale)
 
   local viewportBottom = offsetY + WORLD.gameH * scale
-  local helpX = statsX
-  setColorScaled(palette.muted, 1, 0.82)
+  local helpX = math.floor(offsetX + 14 * uiScale)
+  setColorScaled(palette.muted, 1, 0.80)
   drawText("space boost  r restart  esc quit", helpX, math.floor(viewportBottom - lineH * 3 - 10 * uiScale))
-  drawText(string.format("threshold %.0f rpm", SLICE.collapseRpm), helpX, math.floor(viewportBottom - lineH * 2 - 6 * uiScale))
+  drawText("time boosts to bleed instability", helpX, math.floor(viewportBottom - lineH * 2 - 6 * uiScale))
   if tier >= 3 then
-    setColorDirect(1, 0.34 + 0.20 * pulseMix, 0.30, 0.9)
+    setColorDirect(1, 0.34 + 0.20 * pulse, 0.30, 0.9)
     drawText("REDLINE", helpX, math.floor(viewportBottom - lineH - 2 * uiScale))
   else
-    setColorScaled(palette.muted, 1, 0.70)
-    drawText("time your boost inside the target arc", helpX, math.floor(viewportBottom - lineH - 2 * uiScale))
+    setColorScaled(palette.muted, 1, 0.78)
+    drawText(string.format("Collapse Shards %d", state.totalShards or 0), helpX, math.floor(viewportBottom - lineH - 2 * uiScale))
   end
 end
 
@@ -2661,7 +2904,11 @@ function drawGameOverOverlay()
   love.graphics.rectangle("line", panelX, panelY, panelW, panelH)
 
   local title = "collapse"
-  local subtitle = string.format("rpm threshold reached: %.0f", GAMEPLAY.rpmCollapseThreshold)
+  local subtitle = string.format(
+    "instability reached %d / %d",
+    math.floor(state.instability or 0),
+    state.instabilityMax or RUN_PRESSURE.instability.max
+  )
   setColorScaled(swatch.brightest, 1, 1)
   drawText(title, panelX + pad, panelY + pad)
   setColorScaled(palette.text, 1, 0.82)
@@ -2673,10 +2920,11 @@ function drawGameOverOverlay()
   local valueX = panelX + pad + labelW
   local stats = {
     {"max rpm reached", string.format("%.1f", state.maxRpmReached or 0)},
+    {"max instability", string.format("%.1f", state.maxInstabilityReached or 0)},
     {"perfect hits", tostring(state.perfectHits or 0)},
     {"good hits", tostring(state.goodHits or 0)},
     {"longest resonance", string.format("%.1f", state.longestResonance or 0)},
-    {"time above 70 rpm", string.format("%.1fs", state.secondsAbove70rpm or 0)},
+    {"Flux gained", tostring(state.flux or 0)},
     {"Collapse Shards gained", tostring(state.shardsGainedThisRun or 0)},
     {"total Collapse Shards", tostring(state.totalShards or 0)},
   }
@@ -3065,20 +3313,21 @@ local function drawTimingWorldFx()
 end
 
 local function drawDangerOverlay()
-  local danger = dangerBlendForRpm(state.currentRpm or 0)
-  local redline = clamp(((state.currentRpm or 0) - SLICE.dangerousRpm) / math.max(1, SLICE.collapseRpm - SLICE.dangerousRpm), 0, 1)
-  local pulse = 0.5 + 0.5 * math.sin(state.time * (7 + redline * 8))
+  local stress = instabilityStressBlend()
+  local tier = instabilityTier()
+  local pulse = 0.5 + 0.5 * math.sin(state.time * (4 + tier * 3.5))
   local pulseMix = smoothstep(pulse)
   local missFlash = clamp((state.missFlashTimer or 0) / 0.13, 0, 1)
+  local spikeFlash = clamp((state.instabilitySpikeTimer or 0) / RUN_PRESSURE.instability.spikeFlashSeconds, 0, 1)
   local collapseFlash = clamp((state.collapseFreezeTimer or 0) / math.max(0.0001, SLICE.collapseFreezeSeconds), 0, 1)
-  local flash = math.max(missFlash, collapseFlash)
-  if danger <= 0 and flash <= 0 then
+  local flash = math.max(missFlash, spikeFlash, collapseFlash)
+  if stress <= 0 and flash <= 0 then
     return
   end
 
   local w, h = love.graphics.getDimensions()
-  if danger > 0 then
-    local edgeAlpha = clamp(danger * (0.08 + 0.14 * pulseMix), 0, 0.34)
+  if stress > 0 then
+    local edgeAlpha = clamp(stress * (0.08 + 0.15 * pulseMix), 0, 0.36)
     setColorDirect(0.12, 0, 0, edgeAlpha)
     local edgeSize = math.floor(math.max(10, 36 * (scale >= 1 and scale or 1)))
     love.graphics.rectangle("fill", 0, 0, w, edgeSize)
@@ -3088,11 +3337,13 @@ local function drawDangerOverlay()
   end
 
   if flash > 0 then
-    local isMiss = missFlash >= collapseFlash
-    if isMiss then
-      setColorDirect(0.35, 0.14, 0.18, 0.18 * flash)
+    local isCollapse = collapseFlash >= missFlash and collapseFlash >= spikeFlash
+    if isCollapse then
+      setColorDirect(1, 0.34, 0.26, 0.26 * flash)
+    elseif spikeFlash >= missFlash then
+      setColorDirect(0.55, 0.16, 0.18, 0.20 * flash)
     else
-      setColorDirect(1, 0.32, 0.24, 0.24 * flash)
+      setColorDirect(0.35, 0.14, 0.18, 0.18 * flash)
     end
     love.graphics.rectangle("fill", 0, 0, w, h)
   end
@@ -3539,12 +3790,10 @@ function love.update(dt)
     if (state.currentRpm or 0) >= SLICE.highRiskRpm then
       state.secondsAbove70rpm = (state.secondsAbove70rpm or 0) + dt
     end
+    updateFluxBandProgress(dt)
+    updatePassiveInstability(dt)
     if (state.currentRpm or 0) >= SLICE.redlineRpm then
       state.redlineFlashTimer = math.max(state.redlineFlashTimer or 0, 0.06)
-    end
-    updateRpmLimitFill(dt)
-    if state.currentRpm >= GAMEPLAY.rpmCollapseThreshold then
-      triggerRpmCollapse()
     end
   end
   updateInstabilityEffects(dt)
