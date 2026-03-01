@@ -1,303 +1,9 @@
+local Config = require("game.config.game_config")
 local Systems = {
+  DeckBuilder = require("game.systems.deck_builder"),
   Modifier = require("game.systems.modifiers"),
   Orbiters = require("game.systems.orbiters"),
-}
-
-local GAME_W = 1280
-local GAME_H = 720
-local TWO_PI = math.pi * 2
-local RAD_PER_SECOND_TO_RPM = 60 / TWO_PI
-local RPM_TO_RAD_PER_SECOND = TWO_PI / 60
-local CAMERA_LIGHT_HEIGHT = 280
-local CAMERA_LIGHT_Z_SCALE = 220
-local CAMERA_LIGHT_AMBIENT = 0.10
-local CAMERA_LIGHT_INTENSITY = 2.85
-local CAMERA_LIGHT_FALLOFF = 1 / (900 * 900)
-local LIGHT_ORBIT_PERIOD_SECONDS = 120
-local LIGHT_ORBIT_RADIUS_X = GAME_W * 0.62
-local LIGHT_ORBIT_RADIUS_Y = GAME_H * 0.42
-local LIGHT_ORBIT_Z_BASE = 0.38
-local LIGHT_ORBIT_Z_VARIATION = 0.16
-local LIGHT_SOURCE_MARKER_RADIUS = 8
-local LIGHT_SOURCE_HIT_PADDING = 6
-local ZOOM_MIN = 0.55
-local ZOOM_MAX = 2
-local PERSPECTIVE_Z_STRENGTH = 0.10
-local PERSPECTIVE_MIN_SCALE = 0.88
-local PERSPECTIVE_MAX_SCALE = 1.18
-local DEPTH_SORT_HYSTERESIS = 0.035
-local BODY_SHADE_DARK_FLOOR_TONE = 0.22
-local BODY_SHADE_ECLIPSE_THRESHOLD = 0.16
-local BODY_SHADE_CONTRAST = 1.75
-local ORBIT_CONFIGS = {
-  megaPlanet = {
-    bandCapacity = 1,
-    baseRadius = 440,
-    bandStep = 90,
-    fixedAltitude = true,
-    tiltMin = 0.24,
-    tiltRange = 0.5,
-    speedMin = 0.08,
-    speedRange = 0.04,
-  },
-  planet = {
-    bandCapacity = 2,
-    baseRadius = 180,
-    bandStep = 56,
-    fixedAltitude = true,
-    tiltMin = 0.28,
-    tiltRange = 0.9,
-    speedMin = 0.16,
-    speedRange = 0.08,
-  },
-  moon = {
-    bandCapacity = 4,
-    baseRadius = 100,
-    bandStep = 34,
-    fixedAltitude = true,
-    tiltMin = 0.35,
-    tiltRange = 1.1,
-    speedMin = 0.42,
-    speedRange = 0.15,
-  },
-  satellite = {
-    bandCapacity = 6,
-    baseRadius = 40,
-    bandStep = 8,
-    fixedAltitude = true,
-    altitudeCapacity = 6,
-    altitudeSlotStep = 0.11,
-    altitudeBandStep = 0.20,
-    tiltMin = 0.30,
-    tiltRange = 1.2,
-    speedMin = 0.70,
-    speedRange = 0.20,
-  },
-  moonChildSatellite = {
-    bandCapacity = 4,
-    baseRadius = 10,
-    bandStep = 2.0,
-    altitudeCapacity = 4,
-    altitudeSlotStep = 0.08,
-    altitudeBandStep = 0.12,
-    tiltMin = 0.30,
-    tiltRange = 1.2,
-    speedMin = 0.90,
-    speedRange = 0.55,
-  },
-}
-local BODY_VISUAL = {
-  planetRadius = 30,
-  orbitPlanetRadius = 24,
-  megaPlanetRadius = 150,
-  moonRadius = 10,
-  satelliteRadius = 4,
-  moonChildSatelliteRadius = 1.8,
-}
-local PLANET_IMPULSE_MULTIPLIER = 2
-local PLANET_IMPULSE_TARGET_BOOST = PLANET_IMPULSE_MULTIPLIER - 1
-local PLANET_IMPULSE_DURATION = 10
-local PLANET_IMPULSE_RISE_RATE = 4.5
-local PLANET_IMPULSE_FALL_RATE = 6.5
-local PLANET_BOUNCE_DURATION = 0.12
-local GRAVITY_WELL_INNER_SCALE = 0.06
-local GRAVITY_WELL_RADIUS_SCALE = 1.18
-local GRAVITY_WELL_RADIAL_STRENGTH = 0.009
-local GRAVITY_WELL_SWIRL_STRENGTH = 0.00028
-local SPEED_WAVE_RIPPLE_LIFETIME = 1.1
-local SPEED_WAVE_RIPPLE_WIDTH_START = 0.020
-local SPEED_WAVE_RIPPLE_WIDTH_END = 0.092
-local SPEED_WAVE_RIPPLE_RADIAL_STRENGTH = 0.062
-local SPEED_WAVE_RIPPLE_SWIRL_STRENGTH = 0.0018
-local SPEED_WAVE_RIPPLE_END_PADDING = 0.12
-local PLANET_COLOR_CYCLE_SECONDS = 30
-local ORBIT_ICON_CYCLE_SECONDS = 1.8
-local ORBIT_ICON_FLATTEN = 0.84
-local ORBIT_ICON_SIZE = 6
-local UI_FONT_SIZE = 24
-local MAX_MOONS = 64
-local MAX_SATELLITES = 64
-local STARTING_HAND_SIZE = 5
-local TURN_ENERGY = 3
-local MAX_TURNS = 4
-local OBJECTIVE_RPM = 40
-local CORE_BASE_RPM = 6
-local HEAT_CAP = 10
-local END_TURN_HEAT_GAIN = 1
-local CARD_W = 176
-local CARD_H = 104
-local CARD_GAP = 10
-local END_TURN_W = 118
-local END_TURN_H = 34
-local CARD_DEFS = {
-  moonseed = {
-    id = "moonseed",
-    name = "moonseed",
-    cost = 2,
-    starterCopies = 4,
-    isMoonCard = true,
-    line = "summon moon 4 rpm",
-    tooltip = "Summon a Moon with 4 RPM. Gain 1 Heat.",
-  },
-  coolant_vent = {
-    id = "coolant_vent",
-    name = "coolant vent",
-    cost = 1,
-    starterCopies = 4,
-    line = "vent 2",
-    tooltip = "Vent 2.",
-  },
-  spin_up = {
-    id = "spin_up",
-    name = "spin up",
-    cost = 1,
-    starterCopies = 2,
-    line = "spin +1",
-    tooltip = "All Moons gain +1 RPM permanently this run. Gain 1 Heat.",
-  },
-  overclock = {
-    id = "overclock",
-    name = "overclock",
-    cost = 1,
-    starterCopies = 2,
-    line = "overclock +2",
-    tooltip = "This turn, all Moons gain +2 RPM. Gain 1 Heat.",
-  },
-  heavy_moon = {
-    id = "heavy_moon",
-    name = "heavy moon",
-    cost = 2,
-    shopPrice = 30,
-    isMoonCard = true,
-    line = "summon heavy 6 rpm",
-    tooltip = "Summon Heavy Moon with 6 RPM. Gain 2 Heat.",
-  },
-  twin_seed = {
-    id = "twin_seed",
-    name = "twin seed",
-    cost = 3,
-    shopPrice = 35,
-    isMoonCard = true,
-    line = "summon 2x moon 3",
-    tooltip = "Summon 2 Moons with 3 RPM each. Gain 2 Heat.",
-  },
-  precision_spin = {
-    id = "precision_spin",
-    name = "precision spin",
-    cost = 1,
-    shopPrice = 35,
-    line = "spin +2",
-    tooltip = "All Moons gain +2 RPM permanently this run. Gain 2 Heat.",
-  },
-  cold_sink = {
-    id = "cold_sink",
-    name = "cold sink",
-    cost = 1,
-    shopPrice = 25,
-    line = "vent 4",
-    tooltip = "Vent 4.",
-  },
-  redline = {
-    id = "redline",
-    name = "redline",
-    cost = 1,
-    shopPrice = 40,
-    line = "overclock +4",
-    tooltip = "This turn, all Moons gain +4 RPM. Gain 2 Heat.",
-  },
-  containment = {
-    id = "containment",
-    name = "containment",
-    cost = 1,
-    shopPrice = 30,
-    line = "vent 2, next -1 heat",
-    tooltip = "Vent 2. Next card this turn gains -1 Heat.",
-  },
-  compression = {
-    id = "compression",
-    name = "compression",
-    cost = 1,
-    shopPrice = 35,
-    line = "next moon cheaper +2",
-    tooltip = "Next Moon card this turn costs 1 less and gains +2 RPM.",
-  },
-  reactor_feed = {
-    id = "reactor_feed",
-    name = "reactor feed",
-    cost = 0,
-    shopPrice = 30,
-    line = "+1 energy this turn",
-    tooltip = "Gain +1 Energy this turn. Gain 1 Heat.",
-  },
-  resonant_burst = {
-    id = "resonant_burst",
-    name = "resonant burst",
-    cost = 2,
-    shopPrice = 45,
-    line = "+2 rpm this turn/moon",
-    tooltip = "Gain +2 RPM this turn per Moon. Gain 2 Heat.",
-  },
-  anchor = {
-    id = "anchor",
-    name = "anchor",
-    cost = 2,
-    shopPrice = 40,
-    line = "summon anchor 2 rpm",
-    tooltip = "Summon Anchor with 2 RPM. End-turn Heat gain -1.",
-  },
-}
-local STARTER_CARD_ORDER = {"moonseed", "coolant_vent", "spin_up", "overclock"}
-local SHOP_CARD_ORDER = {
-  "heavy_moon",
-  "twin_seed",
-  "precision_spin",
-  "cold_sink",
-  "redline",
-  "containment",
-  "compression",
-  "reactor_feed",
-  "resonant_burst",
-  "anchor",
-}
-local STARTING_DECK = {}
-do
-  for i = 1, #STARTER_CARD_ORDER do
-    local id = STARTER_CARD_ORDER[i]
-    local copies = CARD_DEFS[id].starterCopies or 0
-    for _ = 1, copies do
-      STARTING_DECK[#STARTING_DECK + 1] = id
-    end
-  end
-end
-local BG_MUSIC_VOLUME = 0.72
-local BG_MUSIC_LOOP_FADE_SECONDS = 0.28
-local BG_MUSIC_DUCK_SECONDS = 0.22
-local BG_MUSIC_DUCK_GAIN = 0.42
-local UPGRADE_FX_VOLUME = 0.9
-local UPGRADE_FX_FADE_IN_SECONDS = 0.03
-local UPGRADE_FX_START_OFFSET_SECONDS = 0.008
-local CLICK_FX_VOLUME_OPEN = 0.50
-local CLICK_FX_VOLUME_CLOSE = 0.43
-local CLICK_FX_PITCH_OPEN = 1.0
-local CLICK_FX_PITCH_CLOSE = 0.88
-local CLICK_FX_MENU_PITCH_MIN = 0.92
-local CLICK_FX_MENU_PITCH_MAX = 1.08
-local SELECTED_ORBIT_COLOR = {1.0000, 0.5098, 0.4549, 1}
-local SPHERE_SHADE_STYLE_OFF = {
-  contrast = 1.08,
-  darkFloor = BODY_SHADE_DARK_FLOOR_TONE,
-  toneSteps = 0,
-  facetSides = 0,
-  ditherStrength = 0,
-  ditherScale = 1,
-}
-local SPHERE_SHADE_STYLE_ON = {
-  contrast = 0.94,
-  darkFloor = BODY_SHADE_DARK_FLOOR_TONE + 0.01,
-  toneSteps = 12,
-  facetSides = 0,
-  ditherStrength = 0.012,
-  ditherScale = 1.60,
+  CardRun = require("game.systems.card_run"),
 }
 
 local canvas
@@ -321,58 +27,13 @@ local offsetX = 0
 local offsetY = 0
 local zoom = 1
 
-local cx = math.floor(GAME_W / 2)
-local cy = math.floor(GAME_H / 2)
+local cx = math.floor(Config.GAME_W / 2)
+local cy = math.floor(Config.GAME_H / 2)
 
-local swatch = {
-  brightest = {1.0000, 0.5098, 0.4549, 1}, -- #ff8274
-  bright = {0.8353, 0.2353, 0.4157, 1},    -- #d53c6a
-  mid = {0.4863, 0.0941, 0.2353, 1},       -- #7c183c
-  dim = {0.2745, 0.0549, 0.1686, 1},       -- #460e2b
-  dimmest = {0.1922, 0.0196, 0.1176, 1},   -- #31051e
-  nearDark = {0.1216, 0.0196, 0.0627, 1},  -- #1f0510
-  darkest = {0.0745, 0.0078, 0.0314, 1},   -- #130208
-}
-
-local palette = {
-  space = swatch.darkest,
-  nebulaA = swatch.nearDark,
-  nebulaB = swatch.dimmest,
-  starA = swatch.mid,
-  starB = swatch.brightest,
-  orbit = swatch.dim,
-  panel = swatch.brightest,
-  panelEdge = swatch.brightest,
-  text = swatch.brightest,
-  muted = swatch.brightest,
-  accent = swatch.mid,
-  planetCore = swatch.mid,
-  planetDark = swatch.dimmest,
-  planetMid = swatch.dim,
-  planetLight = swatch.brightest,
-  moonFront = swatch.brightest,
-  moonBack = swatch.mid,
-  satelliteFront = swatch.brightest,
-  satelliteBack = swatch.dim,
-  trail = {swatch.bright[1], swatch.bright[2], swatch.bright[3], 0.35},
-  satelliteTrail = {swatch.mid[1], swatch.mid[2], swatch.mid[3], 0.35},
-}
-local paletteSwatches = {
-  swatch.brightest,
-  swatch.bright,
-  swatch.mid,
-  swatch.dim,
-  swatch.dimmest,
-  swatch.nearDark,
-  swatch.darkest,
-}
-local orbitColorCycle = {
-  swatch.brightest,
-  swatch.bright,
-  swatch.mid,
-  swatch.dim,
-  swatch.dimmest,
-}
+local swatch = Config.swatch
+local palette = Config.palette
+local paletteSwatches = Config.paletteSwatches
+local orbitColorCycle = Config.orbitColorCycle
 
 local state = {
   screen = "main_menu",
@@ -390,19 +51,19 @@ local state = {
   borderlessFullscreen = false,
   planetBounceTime = 0,
   speedWaveRipples = {},
-  planetVisualRadius = BODY_VISUAL.planetRadius,
+  planetVisualRadius = Config.BODY_VISUAL.planetRadius,
   hand = {},
   drawPile = {},
   discardPile = {},
   cardHoverLift = {},
   turn = 1,
-  maxTurns = MAX_TURNS,
-  energy = TURN_ENERGY,
-  objectiveRpm = OBJECTIVE_RPM,
-  coreRpm = CORE_BASE_RPM,
+  maxTurns = Config.MAX_TURNS,
+  energy = Config.TURN_ENERGY,
+  objectiveRpm = Config.OBJECTIVE_RPM,
+  coreRpm = Config.CORE_BASE_RPM,
   heat = 0,
-  heatCap = HEAT_CAP,
-  highestRpm = CORE_BASE_RPM,
+  heatCap = Config.HEAT_CAP,
+  highestRpm = Config.CORE_BASE_RPM,
   rewardRpm = 0,
   permanentMoonSpin = 0,
   turnOverclockRpm = 0,
@@ -413,6 +74,10 @@ local state = {
   runOutcome = "",
   runComplete = false,
   runWon = false,
+  runRewardClaimed = false,
+  currency = 100,
+  deckList = nil,
+  inventory = {},
   lastTurnPulsePlayed = false,
   rpmRollTimer = 0,
   rpmRollDuration = 0.30,
@@ -425,11 +90,14 @@ local ui = {
   mainDeckBtn = {x = 0, y = 0, w = 0, h = 0},
   menuBackBtn = {x = 0, y = 0, w = 0, h = 0},
   deckCardButtons = {},
+  deckInventoryButtons = {},
   deckShopButtons = {},
   cardButtons = {},
   drawPile = {x = 0, y = 0, w = 0, h = 0},
   discardPile = {x = 0, y = 0, w = 0, h = 0},
   endTurnBtn = {x = 0, y = 0, w = 0, h = 0},
+  endGameMenuBtn = {x = 0, y = 0, w = 0, h = 0},
+  endGameReplayBtn = {x = 0, y = 0, w = 0, h = 0},
 }
 
 local runtime = {}
@@ -437,9 +105,9 @@ local playMenuBuyClickFx
 
 local function activeSphereShadeStyle()
   if state.sphereDitherEnabled then
-    return SPHERE_SHADE_STYLE_ON
+    return Config.SPHERE_SHADE_STYLE_ON
   end
-  return SPHERE_SHADE_STYLE_OFF
+  return Config.SPHERE_SHADE_STYLE_OFF
 end
 
 local function toggleSphereShadeStyle()
@@ -466,21 +134,21 @@ local function pointInRect(px, py, rect)
 end
 
 local function sideLightWorldPosition()
-  local cycle = (state.time % LIGHT_ORBIT_PERIOD_SECONDS) / LIGHT_ORBIT_PERIOD_SECONDS
+  local cycle = (state.time % Config.LIGHT_ORBIT_PERIOD_SECONDS) / Config.LIGHT_ORBIT_PERIOD_SECONDS
   -- Start from the left and orbit the playfield over two minutes.
-  local a = cycle * TWO_PI + math.pi
-  local x = cx + math.cos(a) * LIGHT_ORBIT_RADIUS_X
-  local y = cy + math.sin(a) * LIGHT_ORBIT_RADIUS_Y
-  local z = LIGHT_ORBIT_Z_BASE + math.sin(a + math.pi * 0.5) * LIGHT_ORBIT_Z_VARIATION
+  local a = cycle * Config.TWO_PI + math.pi
+  local x = cx + math.cos(a) * Config.LIGHT_ORBIT_RADIUS_X
+  local y = cy + math.sin(a) * Config.LIGHT_ORBIT_RADIUS_Y
+  local z = Config.LIGHT_ORBIT_Z_BASE + math.sin(a + math.pi * 0.5) * Config.LIGHT_ORBIT_Z_VARIATION
   return x, y, z
 end
 
 local function lightProjectionZ(z)
-  return (z or 0) + (CAMERA_LIGHT_HEIGHT / zoom) / CAMERA_LIGHT_Z_SCALE
+  return (z or 0) + (Config.CAMERA_LIGHT_HEIGHT / zoom) / Config.CAMERA_LIGHT_Z_SCALE
 end
 
 local function lightDepthForZ(z)
-  return lightProjectionZ(z) * CAMERA_LIGHT_Z_SCALE
+  return lightProjectionZ(z) * Config.CAMERA_LIGHT_Z_SCALE
 end
 
 local function planetShadowFactorAt(x, y, z)
@@ -501,7 +169,7 @@ local function planetShadowFactorAt(x, y, z)
 
   local vx = x - cx
   local vy = y - cy
-  local vz = (z or 0) * CAMERA_LIGHT_Z_SCALE
+  local vz = (z or 0) * Config.CAMERA_LIGHT_Z_SCALE
 
   -- Behind the planet relative to the side light.
   local along = -(vx * dirX + vy * dirY + vz * dirZ)
@@ -517,7 +185,7 @@ local function planetShadowFactorAt(x, y, z)
   local offZ = vz - az
   local radial = math.sqrt(offX * offX + offY * offY + offZ * offZ)
 
-  local shadowRadius = BODY_VISUAL.planetRadius * (1 + along / math.max(1, dirLen * 0.9))
+  local shadowRadius = Config.BODY_VISUAL.planetRadius * (1 + along / math.max(1, dirLen * 0.9))
   local softEdge = shadowRadius * 0.60 + 6
   if radial >= shadowRadius + softEdge then
     return 1
@@ -525,21 +193,21 @@ local function planetShadowFactorAt(x, y, z)
 
   local edgeT = clamp((radial - shadowRadius) / softEdge, 0, 1)
   local coreShadow = 1 - smoothstep(edgeT)
-  local depthStrength = 1 - math.exp(-along / (BODY_VISUAL.planetRadius * 1.6))
+  local depthStrength = 1 - math.exp(-along / (Config.BODY_VISUAL.planetRadius * 1.6))
   local shadowStrength = coreShadow * depthStrength * 0.90
   return clamp(1 - shadowStrength, 0.02, 1)
 end
 
 local function cameraLightAt(x, y, z)
   local lightX, lightY, lightZ = sideLightWorldPosition()
-  local depth = (z or 0) * CAMERA_LIGHT_Z_SCALE
+  local depth = (z or 0) * Config.CAMERA_LIGHT_Z_SCALE
   local lightDepth = lightDepthForZ(lightZ)
   local dx = lightX - x
   local dy = lightY - y
   local dz = lightDepth - depth
   local distSq = dx * dx + dy * dy + dz * dz
-  local attenuation = 1 / (1 + distSq * CAMERA_LIGHT_FALLOFF)
-  local direct = CAMERA_LIGHT_AMBIENT + attenuation * CAMERA_LIGHT_INTENSITY
+  local attenuation = 1 / (1 + distSq * Config.CAMERA_LIGHT_FALLOFF)
+  local direct = Config.CAMERA_LIGHT_AMBIENT + attenuation * Config.CAMERA_LIGHT_INTENSITY
   local shadow = planetShadowFactorAt(x, y, z)
   return clamp(direct * shadow, 0.01, 1.25)
 end
@@ -565,10 +233,10 @@ local function updateOrbiterRenderDepth(orbiter)
     orbiter.sortDepth = targetDepth
     return
   end
-  if targetDepth > depth + DEPTH_SORT_HYSTERESIS then
-    orbiter.sortDepth = targetDepth - DEPTH_SORT_HYSTERESIS
-  elseif targetDepth < depth - DEPTH_SORT_HYSTERESIS then
-    orbiter.sortDepth = targetDepth + DEPTH_SORT_HYSTERESIS
+  if targetDepth > depth + Config.DEPTH_SORT_HYSTERESIS then
+    orbiter.sortDepth = targetDepth - Config.DEPTH_SORT_HYSTERESIS
+  elseif targetDepth < depth - Config.DEPTH_SORT_HYSTERESIS then
+    orbiter.sortDepth = targetDepth + Config.DEPTH_SORT_HYSTERESIS
   end
 end
 
@@ -578,11 +246,11 @@ local function assignRenderOrder(orbiter)
 end
 
 local function perspectiveScaleForZ(z)
-  local denom = 1 - (z or 0) * PERSPECTIVE_Z_STRENGTH
+  local denom = 1 - (z or 0) * Config.PERSPECTIVE_Z_STRENGTH
   if denom < 0.35 then
     denom = 0.35
   end
-  return clamp(1 / denom, PERSPECTIVE_MIN_SCALE, PERSPECTIVE_MAX_SCALE)
+  return clamp(1 / denom, Config.PERSPECTIVE_MIN_SCALE, Config.PERSPECTIVE_MAX_SCALE)
 end
 
 local function projectWorldPoint(x, y, z)
@@ -598,7 +266,7 @@ local function lightSourceProjected()
 end
 
 local function lightSourceHitRadius(projectScale)
-  return math.max(4, (LIGHT_SOURCE_MARKER_RADIUS + LIGHT_SOURCE_HIT_PADDING) * projectScale)
+  return math.max(4, (Config.LIGHT_SOURCE_MARKER_RADIUS + Config.LIGHT_SOURCE_HIT_PADDING) * projectScale)
 end
 
 local function nearestPaletteSwatch(r, g, b)
@@ -666,11 +334,11 @@ local function sampleOrbitColorCycle(phase)
 end
 
 local function currentPlanetColor()
-  return sampleOrbitColorCycle(state.time / PLANET_COLOR_CYCLE_SECONDS)
+  return sampleOrbitColorCycle(state.time / Config.PLANET_COLOR_CYCLE_SECONDS)
 end
 
 local function computeOrbiterColor(angle)
-  return sampleOrbitColorCycle(angle / TWO_PI)
+  return sampleOrbitColorCycle(angle / Config.TWO_PI)
 end
 
 local function setColorDirect(r, g, b, alpha)
@@ -691,12 +359,12 @@ local function drawText(text, x, y)
 end
 
 local function drawOrbitIcon(x, y, size, alphaScale)
-  local r = math.max(5, size or ORBIT_ICON_SIZE)
+  local r = math.max(5, size or Config.ORBIT_ICON_SIZE)
   local alpha = clamp(alphaScale or 1, 0, 1)
   local orbitR = r
   local bodyR = math.max(2, math.floor(r * 0.34 + 0.5))
-  local orbitRY = orbitR * ORBIT_ICON_FLATTEN
-  local angle = (state.time / ORBIT_ICON_CYCLE_SECONDS) * TWO_PI
+  local orbitRY = orbitR * Config.ORBIT_ICON_FLATTEN
+  local angle = (state.time / Config.ORBIT_ICON_CYCLE_SECONDS) * Config.TWO_PI
   local bx = x + math.cos(angle) * orbitR
   local by = y + math.sin(angle) * orbitRY
 
@@ -722,13 +390,6 @@ local function drawOrbitIcon(x, y, size, alphaScale)
 
   setColorScaled(swatch.brightest, 1, alpha)
   love.graphics.circle("fill", bx, by, bodyR, 12)
-end
-
-local function shuffleInPlace(list)
-  for i = #list, 2, -1 do
-    local j = love.math.random(1, i)
-    list[i], list[j] = list[j], list[i]
-  end
 end
 
 local function createOrbitalParams(config, index)
@@ -757,7 +418,7 @@ end
 
 local function recomputeViewport()
   local w, h = love.graphics.getDimensions()
-  local rawScale = math.min(w / GAME_W, h / GAME_H)
+  local rawScale = math.min(w / Config.GAME_W, h / Config.GAME_H)
   if state.borderlessFullscreen then
     -- In borderless fullscreen, use exact scale so the game fills the display.
     scale = rawScale
@@ -768,8 +429,8 @@ local function recomputeViewport()
     local denom = math.max(1, math.ceil((1 / rawScale) - 1e-6))
     scale = 1 / denom
   end
-  local drawW = GAME_W * scale
-  local drawH = GAME_H * scale
+  local drawW = Config.GAME_W * scale
+  local drawH = Config.GAME_H * scale
   offsetX = math.floor((w - drawW) / 2)
   offsetY = math.floor((h - drawH) / 2)
 end
@@ -816,7 +477,7 @@ end
 
 local function getUiScreenFont()
   local uiScale = scale >= 1 and scale or 1
-  local size = math.max(1, math.floor(UI_FONT_SIZE * uiScale + 0.5))
+  local size = math.max(1, math.floor(Config.UI_FONT_SIZE * uiScale + 0.5))
   if not uiScreenFont or uiScreenFontSize ~= size then
     uiScreenFont = love.graphics.newFont("font_gothic.ttf", size, "mono")
     uiScreenFont:setFilter("nearest", "nearest")
@@ -827,7 +488,7 @@ end
 
 function getRpmDisplayFont()
   local uiScale = scale >= 1 and scale or 1
-  local size = math.max(1, math.floor(UI_FONT_SIZE * uiScale * 3.1 + 0.5))
+  local size = math.max(1, math.floor(Config.UI_FONT_SIZE * uiScale * 3.1 + 0.5))
   if not rpmDisplayFont or rpmDisplayFontSize ~= size then
     rpmDisplayFont = love.graphics.newFont("font_gothic.ttf", size, "mono")
     rpmDisplayFont:setFilter("nearest", "nearest")
@@ -898,385 +559,60 @@ function blackHoleStabilitySpeedMultiplier()
 end
 
 local function collectAllOrbiters()
-  local pool = {}
-  for _, megaPlanet in ipairs(state.megaPlanets) do
-    pool[#pool + 1] = megaPlanet
+  if not runtime.cardRun then
+    return {}
   end
-  for _, planet in ipairs(state.planets) do
-    pool[#pool + 1] = planet
-  end
-  for _, moon in ipairs(state.moons) do
-    pool[#pool + 1] = moon
-    local childSatellites = moon.childSatellites or {}
-    for _, child in ipairs(childSatellites) do
-      pool[#pool + 1] = child
-    end
-  end
-  for _, satellite in ipairs(state.satellites) do
-    pool[#pool + 1] = satellite
-  end
-  return pool
-end
-
-local function isMoonBody(orbiter)
-  return orbiter and (orbiter.bodyKind == "moon" or orbiter.bodyKind == "heavy_moon")
-end
-
-local function countMoonBodies()
-  local count = 0
-  local orbiters = collectAllOrbiters()
-  for i = 1, #orbiters do
-    if isMoonBody(orbiters[i]) then
-      count = count + 1
-    end
-  end
-  return count
-end
-
-local function countAnchors()
-  local count = 0
-  local orbiters = collectAllOrbiters()
-  for i = 1, #orbiters do
-    if orbiters[i].bodyKind == "anchor" then
-      count = count + 1
-    end
-  end
-  return count
-end
-
-local function effectiveBodyRpm(orbiter)
-  if not orbiter then
-    return 0
-  end
-  local rpm = orbiter.baseRpm or 0
-  if isMoonBody(orbiter) then
-    rpm = rpm + state.permanentMoonSpin + state.turnOverclockRpm
-  end
-  return math.max(0, rpm)
-end
-
-local function syncOrbiterSpeedsFromBodies()
-  local orbiters = collectAllOrbiters()
-  for i = 1, #orbiters do
-    local orbiter = orbiters[i]
-    orbiter.speed = effectiveBodyRpm(orbiter) * RPM_TO_RAD_PER_SECOND
-  end
+  return runtime.cardRun:collectAllOrbiters()
 end
 
 local function computeTotalRpm()
-  local total = state.coreRpm + state.turnBurstRpm
-  local orbiters = collectAllOrbiters()
-  for i = 1, #orbiters do
-    total = total + effectiveBodyRpm(orbiters[i])
+  if not runtime.cardRun then
+    return state.coreRpm + state.turnBurstRpm
   end
-  return total
+  return runtime.cardRun:computeTotalRpm()
 end
 
 local function updateHighestRpm()
-  local current = math.floor(computeTotalRpm() + 0.5)
-  if current > state.highestRpm then
-    state.highestRpm = current
+  if not runtime.cardRun then
+    local current = math.floor(computeTotalRpm() + 0.5)
+    if current > state.highestRpm then
+      state.highestRpm = current
+    end
+    return current
   end
-  return current
+  return runtime.cardRun:updateHighestRpm()
 end
 
 local function triggerGravityPulse()
-  state.speedWaveRipples[#state.speedWaveRipples + 1] = {
-    age = 0,
-    life = SPEED_WAVE_RIPPLE_LIFETIME,
-  }
-end
-
-local function refillDrawPileIfEmpty()
-  if #state.drawPile > 0 or #state.discardPile == 0 then
-    return
-  end
-  for i = 1, #state.discardPile do
-    state.drawPile[#state.drawPile + 1] = state.discardPile[i]
-  end
-  for i = #state.discardPile, 1, -1 do
-    state.discardPile[i] = nil
-  end
-  shuffleInPlace(state.drawPile)
-end
-
-local function drawCards(count)
-  for _ = 1, count do
-    refillDrawPileIfEmpty()
-    if #state.drawPile == 0 then
-      return
-    end
-    state.hand[#state.hand + 1] = table.remove(state.drawPile)
-  end
-end
-
-local function discardCurrentHand()
-  for i = #state.hand, 1, -1 do
-    state.discardPile[#state.discardPile + 1] = state.hand[i]
-    state.hand[i] = nil
-  end
-end
-
-local function resetTurnModifiers()
-  state.turnOverclockRpm = 0
-  state.turnBurstRpm = 0
-  state.nextCardHeatReduction = 0
-  state.nextMoonCostReduction = 0
-  state.nextMoonRpmBonus = 0
-end
-
-local function finishRun(outcome)
-  state.runComplete = true
-  state.runOutcome = outcome
-  state.runWon = outcome ~= "collapse" and state.highestRpm >= state.objectiveRpm
-  state.rewardRpm = state.highestRpm
-end
-
-local function ventHeat(amount)
-  if amount <= 0 then
-    return
-  end
-  state.heat = math.max(0, state.heat - amount)
-end
-
-local function addHeat(amount)
-  if amount <= 0 then
-    return
-  end
-  state.heat = state.heat + amount
-  if state.heat >= state.heatCap then
-    state.heat = state.heatCap
-    updateHighestRpm()
-    finishRun("collapse")
-  end
-end
-
-local function tagBody(orbiter, bodyKind, baseRpm)
-  if not orbiter then
-    return
-  end
-  orbiter.bodyKind = bodyKind
-  orbiter.baseRpm = baseRpm
-end
-
-local function summonMoon(baseRpm)
-  local before = #state.moons
-  if not addMoon(nil) then
-    return false
-  end
-  tagBody(state.moons[before + 1], "moon", baseRpm)
-  return true
-end
-
-local function summonHeavyMoon(baseRpm)
-  local before = #state.planets
-  if not addPlanet() then
-    return false
-  end
-  tagBody(state.planets[before + 1], "heavy_moon", baseRpm)
-  return true
-end
-
-local function summonAnchor(baseRpm)
-  local before = #state.satellites
-  if not addSatellite() then
-    return false
-  end
-  tagBody(state.satellites[before + 1], "anchor", baseRpm)
-  return true
-end
-
-local function applyCard(cardDef, moonBonusRpm)
-  local heatGain = 0
-  local id = cardDef.id
-  if id == "moonseed" then
-    if not summonMoon(4 + moonBonusRpm) then
-      return false
-    end
-    heatGain = 1
-  elseif id == "coolant_vent" then
-    ventHeat(2)
-  elseif id == "spin_up" then
-    state.permanentMoonSpin = state.permanentMoonSpin + 1
-    heatGain = 1
-  elseif id == "overclock" then
-    state.turnOverclockRpm = state.turnOverclockRpm + 2
-    heatGain = 1
-  elseif id == "heavy_moon" then
-    if not summonHeavyMoon(6 + moonBonusRpm) then
-      return false
-    end
-    heatGain = 2
-  elseif id == "twin_seed" then
-    if not summonMoon(3 + moonBonusRpm) then
-      return false
-    end
-    if not summonMoon(3 + moonBonusRpm) then
-      return false
-    end
-    heatGain = 2
-  elseif id == "precision_spin" then
-    state.permanentMoonSpin = state.permanentMoonSpin + 2
-    heatGain = 2
-  elseif id == "cold_sink" then
-    ventHeat(4)
-  elseif id == "redline" then
-    state.turnOverclockRpm = state.turnOverclockRpm + 4
-    heatGain = 2
-  elseif id == "containment" then
-    ventHeat(2)
-    state.nextCardHeatReduction = state.nextCardHeatReduction + 1
-  elseif id == "compression" then
-    state.nextMoonCostReduction = state.nextMoonCostReduction + 1
-    state.nextMoonRpmBonus = state.nextMoonRpmBonus + 2
-  elseif id == "reactor_feed" then
-    state.energy = state.energy + 1
-    heatGain = 1
-  elseif id == "resonant_burst" then
-    state.turnBurstRpm = state.turnBurstRpm + countMoonBodies() * 2
-    heatGain = 2
-  elseif id == "anchor" then
-    if not summonAnchor(2) then
-      return false
-    end
-  else
-    return false
-  end
-
-  local heatReduction = state.nextCardHeatReduction
-  if heatReduction > 0 then
-    heatGain = math.max(0, heatGain - heatReduction)
-    state.nextCardHeatReduction = 0
-  end
-  addHeat(heatGain)
-  syncOrbiterSpeedsFromBodies()
-  updateHighestRpm()
-  return true
-end
-
-local function beginTurn(turnNumber)
-  state.turn = turnNumber
-  state.energy = TURN_ENERGY
-  resetTurnModifiers()
-  drawCards(STARTING_HAND_SIZE)
-  if state.turn == state.maxTurns and not state.lastTurnPulsePlayed then
-    triggerGravityPulse()
-    state.lastTurnPulsePlayed = true
+  if runtime.cardRun then
+    runtime.cardRun:triggerGravityPulse()
   end
 end
 
 local function endPlayerTurn()
-  if state.runComplete then
-    return
+  if runtime.cardRun then
+    runtime.cardRun:endPlayerTurn()
   end
-  local endTurnHeat = math.max(0, END_TURN_HEAT_GAIN - countAnchors())
-  addHeat(endTurnHeat)
-  syncOrbiterSpeedsFromBodies()
-  updateHighestRpm()
-  if state.runComplete then
-    return
-  end
-  discardCurrentHand()
-  if state.turn >= state.maxTurns then
-    finishRun("completed")
-    return
-  end
-  beginTurn(state.turn + 1)
 end
 
 local function currentCardCost(cardDef)
-  if not cardDef then
-    return 0
+  if runtime.cardRun then
+    return runtime.cardRun:currentCardCost(cardDef)
   end
-  local cost = cardDef.cost or 0
-  if cardDef.isMoonCard and state.nextMoonCostReduction > 0 then
-    cost = math.max(0, cost - state.nextMoonCostReduction)
-  end
-  return cost
+  return 0
 end
 
 local function playCard(handIndex)
-  if state.runComplete then
-    return false
+  if runtime.cardRun then
+    return runtime.cardRun:playCard(handIndex)
   end
-  local cardId = state.hand[handIndex]
-  if not cardId then
-    return false
-  end
-  local cardDef = CARD_DEFS[cardId]
-  if not cardDef then
-    return false
-  end
-  local beforeRpm = math.floor(computeTotalRpm() + 0.5)
-  local moonCostReduction = state.nextMoonCostReduction
-  local moonRpmBonus = 0
-  if cardDef.isMoonCard and moonCostReduction > 0 then
-    moonRpmBonus = state.nextMoonRpmBonus
-  end
-  local effectiveCost = currentCardCost(cardDef)
-  if state.energy < effectiveCost then
-    return false
-  end
-  state.energy = state.energy - effectiveCost
-  if cardDef.isMoonCard and moonCostReduction > 0 then
-    state.nextMoonCostReduction = 0
-    state.nextMoonRpmBonus = 0
-  end
-  if not applyCard(cardDef, moonRpmBonus) then
-    state.energy = state.energy + effectiveCost
-    return false
-  end
-  table.remove(state.hand, handIndex)
-  state.discardPile[#state.discardPile + 1] = cardId
-  local afterRpm = math.floor(computeTotalRpm() + 0.5)
-  state.rpmRollFrom = beforeRpm
-  state.rpmRollTo = afterRpm
-  state.rpmRollTimer = state.rpmRollDuration
-  playMenuBuyClickFx()
-  return true
+  return false
 end
 
 local function startCardRun()
-  state.megaPlanets = {}
-  state.planets = {}
-  state.moons = {}
-  state.satellites = {}
-  state.renderOrbiters = {}
-  state.nextRenderOrder = 0
-  state.selectedOrbiter = nil
-  state.selectedLightSource = false
-  state.hand = {}
-  state.drawPile = {}
-  state.discardPile = {}
-  state.cardHoverLift = {}
-  state.speedWaveRipples = {}
-  for i = 1, #STARTING_DECK do
-    state.drawPile[#state.drawPile + 1] = STARTING_DECK[i]
+  if runtime.cardRun then
+    runtime.cardRun:startCardRun()
   end
-  shuffleInPlace(state.drawPile)
-  state.coreRpm = CORE_BASE_RPM
-  state.heat = 0
-  state.heatCap = HEAT_CAP
-  state.permanentMoonSpin = 0
-  state.turnOverclockRpm = 0
-  state.turnBurstRpm = 0
-  state.nextCardHeatReduction = 0
-  state.nextMoonCostReduction = 0
-  state.nextMoonRpmBonus = 0
-  state.highestRpm = CORE_BASE_RPM
-  state.rewardRpm = 0
-  state.runOutcome = ""
-  state.turn = 1
-  state.energy = TURN_ENERGY
-  state.runComplete = false
-  state.runWon = false
-  state.lastTurnPulsePlayed = false
-  state.rpmRollFrom = 0
-  state.rpmRollTo = 0
-  state.rpmRollTimer = 0
-  syncOrbiterSpeedsFromBodies()
-  updateHighestRpm()
-  beginTurn(1)
 end
 
 function switchScreen(screenId)
@@ -1294,15 +630,27 @@ function openDeckMenu()
 end
 
 function startRunFromMenu()
+  if runtime.deckBuilder and runtime.deckBuilder:getDeckSize() < runtime.deckBuilder:getMinDeckSize() then
+    openDeckMenu()
+    return
+  end
   startCardRun()
   switchScreen("run")
 end
 
 local function onPlanetClicked()
-  state.planetBounceTime = PLANET_BOUNCE_DURATION
+  state.planetBounceTime = Config.PLANET_BOUNCE_DURATION
 end
 
 local function initGameSystems()
+  runtime.deckBuilder = Systems.DeckBuilder.new({
+    state = state,
+    config = Config,
+    startingCurrency = 100,
+    minDeckSize = 10,
+    maxDeckSize = 20,
+  })
+
   runtime.modifiers = Systems.Modifier.new()
   local freeEconomy = {
     trySpendCost = function()
@@ -1316,15 +664,15 @@ local function initGameSystems()
     state = state,
     economy = freeEconomy,
     modifiers = runtime.modifiers,
-    orbitConfigs = ORBIT_CONFIGS,
-    bodyVisual = BODY_VISUAL,
-    twoPi = TWO_PI,
-    maxMoons = MAX_MOONS,
-    maxSatellites = MAX_SATELLITES,
-    impulseDuration = PLANET_IMPULSE_DURATION,
-    impulseTargetBoost = PLANET_IMPULSE_TARGET_BOOST,
-    impulseRiseRate = PLANET_IMPULSE_RISE_RATE,
-    impulseFallRate = PLANET_IMPULSE_FALL_RATE,
+    orbitConfigs = Config.ORBIT_CONFIGS,
+    bodyVisual = Config.BODY_VISUAL,
+    twoPi = Config.TWO_PI,
+    maxMoons = Config.MAX_MOONS,
+    maxSatellites = Config.MAX_SATELLITES,
+    impulseDuration = Config.PLANET_IMPULSE_DURATION,
+    impulseTargetBoost = Config.PLANET_IMPULSE_TARGET_BOOST,
+    impulseRiseRate = Config.PLANET_IMPULSE_RISE_RATE,
+    impulseFallRate = Config.PLANET_IMPULSE_FALL_RATE,
     createOrbitalParams = createOrbitalParams,
     updateOrbiterPosition = updateOrbiterPosition,
     assignRenderOrder = assignRenderOrder,
@@ -1335,6 +683,27 @@ local function initGameSystems()
       return 0
     end,
     disableOrbitRewards = true,
+  })
+
+  runtime.cardRun = Systems.CardRun.new({
+    state = state,
+    config = Config,
+    orbiters = {
+      addMoon = addMoon,
+      addPlanet = addPlanet,
+      addSatellite = addSatellite,
+    },
+    getRunDeck = function()
+      if runtime.deckBuilder then
+        return runtime.deckBuilder:getDeckListCopy()
+      end
+      return nil
+    end,
+    onCardPlayed = function()
+      playMenuBuyClickFx()
+    end,
+    onRunFinished = function(_, _)
+    end,
   })
 end
 
@@ -1369,7 +738,7 @@ function drawSelectedOrbit(frontPass)
         local segZ = (pz + z) * 0.5
         if (frontPass and segZ > 0) or ((not frontPass) and segZ <= 0) then
           local segLight = cameraLightAt((px + x) * 0.5, (py + y) * 0.5, segZ)
-          setLitColorDirect(SELECTED_ORBIT_COLOR[1], SELECTED_ORBIT_COLOR[2], SELECTED_ORBIT_COLOR[3], segLight, 0.84)
+          setLitColorDirect(Config.SELECTED_ORBIT_COLOR[1], Config.SELECTED_ORBIT_COLOR[2], Config.SELECTED_ORBIT_COLOR[3], segLight, 0.84)
           local sx0, sy0 = projectWorldPoint(px, py, pz)
           local sx1, sy1 = projectWorldPoint(x, y, z)
           love.graphics.line(math.floor(sx0 + 0.5), math.floor(sy0 + 0.5), math.floor(sx1 + 0.5), math.floor(sy1 + 0.5))
@@ -1391,17 +760,17 @@ function drawSelectedLightOrbit(frontPass)
 
   local step = 0.08
   local px, py, pz, rawZ
-  for a = 0, TWO_PI + step, step do
-    local x = cx + math.cos(a) * LIGHT_ORBIT_RADIUS_X
-    local y = cy + math.sin(a) * LIGHT_ORBIT_RADIUS_Y
-    local z = LIGHT_ORBIT_Z_BASE + math.sin(a + math.pi * 0.5) * LIGHT_ORBIT_Z_VARIATION
+  for a = 0, Config.TWO_PI + step, step do
+    local x = cx + math.cos(a) * Config.LIGHT_ORBIT_RADIUS_X
+    local y = cy + math.sin(a) * Config.LIGHT_ORBIT_RADIUS_Y
+    local z = Config.LIGHT_ORBIT_Z_BASE + math.sin(a + math.pi * 0.5) * Config.LIGHT_ORBIT_Z_VARIATION
     local projectedZ = lightProjectionZ(z)
     if px then
       local segProjZ = (pz + projectedZ) * 0.5
       if (frontPass and segProjZ > 0) or ((not frontPass) and segProjZ <= 0) then
         local segRawZ = (rawZ + z) * 0.5
         local segLight = cameraLightAt((px + x) * 0.5, (py + y) * 0.5, segRawZ)
-        setLitColorDirect(SELECTED_ORBIT_COLOR[1], SELECTED_ORBIT_COLOR[2], SELECTED_ORBIT_COLOR[3], segLight, 0.58)
+        setLitColorDirect(Config.SELECTED_ORBIT_COLOR[1], Config.SELECTED_ORBIT_COLOR[2], Config.SELECTED_ORBIT_COLOR[3], segLight, 0.58)
         local sx0, sy0 = projectWorldPoint(px, py, pz)
         local sx1, sy1 = projectWorldPoint(x, y, projectedZ)
         love.graphics.line(math.floor(sx0 + 0.5), math.floor(sy0 + 0.5), math.floor(sx1 + 0.5), math.floor(sy1 + 0.5))
@@ -1418,11 +787,11 @@ function drawLitSphere(x, y, z, radius, r, g, b, lightScale, segments)
   local shadeStyle = activeSphereShadeStyle()
   local lightX, lightY, lightZ = sideLightWorldPosition()
   local lightPx, lightPy = projectWorldPoint(lightX, lightY, lightProjectionZ(lightZ))
-  local objDepth = (z or 0) * CAMERA_LIGHT_Z_SCALE
+  local objDepth = (z or 0) * Config.CAMERA_LIGHT_Z_SCALE
   local lightDepth = lightDepthForZ(lightZ)
   local lx = lightPx - px
   local ly = -(lightPy - py)
-  local lz = (lightDepth - objDepth) / CAMERA_LIGHT_Z_SCALE
+  local lz = (lightDepth - objDepth) / Config.CAMERA_LIGHT_Z_SCALE
   local len = math.sqrt(lx * lx + ly * ly + lz * lz)
   if len < 0.0001 then
     lx, ly, lz = 1, 0, 0
@@ -1435,7 +804,7 @@ function drawLitSphere(x, y, z, radius, r, g, b, lightScale, segments)
   local light = clamp(lightScale or 1, 0.02, 1.3)
   local occlusion = 1
   if (z or 0) < 0 then
-    local shadowRadius = BODY_VISUAL.planetRadius + pr * 0.9
+    local shadowRadius = Config.BODY_VISUAL.planetRadius + pr * 0.9
     local dx = px - cx
     local dy = py - cy
     local d = math.sqrt(dx * dx + dy * dy)
@@ -1446,7 +815,7 @@ function drawLitSphere(x, y, z, radius, r, g, b, lightScale, segments)
   end
   local bodyLight = light * occlusion
   local shadowFactor = planetShadowFactorAt(x, y, z) * occlusion
-  local inEclipse = shadowFactor <= BODY_SHADE_ECLIPSE_THRESHOLD
+  local inEclipse = shadowFactor <= Config.BODY_SHADE_ECLIPSE_THRESHOLD
 
   if inEclipse then
     setColorDirect(palette.space[1], palette.space[2], palette.space[3], 1)
@@ -1464,7 +833,7 @@ function drawLitSphere(x, y, z, radius, r, g, b, lightScale, segments)
     sphereShader:send("lightPower", shaderLightPower)
     sphereShader:send("ambient", shaderAmbient)
     sphereShader:send("contrast", shadeStyle.contrast or 1.08)
-    sphereShader:send("darkFloor", clamp(shadeStyle.darkFloor or BODY_SHADE_DARK_FLOOR_TONE, 0, 1))
+    sphereShader:send("darkFloor", clamp(shadeStyle.darkFloor or Config.BODY_SHADE_DARK_FLOOR_TONE, 0, 1))
     sphereShader:send("toneSteps", shadeStyle.toneSteps or 0)
     sphereShader:send("facetSides", shadeStyle.facetSides or 0)
     sphereShader:send("ditherStrength", shadeStyle.ditherStrength or 0)
@@ -1480,11 +849,11 @@ function drawLitSphere(x, y, z, radius, r, g, b, lightScale, segments)
 end
 
 function drawPlanet()
-  local t = 1 - clamp(state.planetBounceTime / PLANET_BOUNCE_DURATION, 0, 1)
+  local t = 1 - clamp(state.planetBounceTime / Config.PLANET_BOUNCE_DURATION, 0, 1)
   local kick = math.sin(t * math.pi)
   local bounceScale = 1 + kick * 0.14 * (1 - t)
   local px, py, projScale = projectWorldPoint(cx, cy, 0)
-  local pr = math.max(3, BODY_VISUAL.planetRadius * bounceScale * projScale)
+  local pr = math.max(3, Config.BODY_VISUAL.planetRadius * bounceScale * projScale)
 
   setColorDirect(0, 0, 0, 1)
   love.graphics.circle("fill", px, py, pr, 44)
@@ -1502,7 +871,7 @@ function drawLightSource(frontPass)
   end
 
   local baseLight = clamp(cameraLightAt(lightX, lightY, lightZ) * 1.08, 0.45, 1.25)
-  local coreR = math.max(2, LIGHT_SOURCE_MARKER_RADIUS * projectScale)
+  local coreR = math.max(2, Config.LIGHT_SOURCE_MARKER_RADIUS * projectScale)
   local haloR = coreR * 1.9
 
   setLitColorDirect(swatch.bright[1], swatch.bright[2], swatch.bright[3], baseLight, 0.42)
@@ -1514,9 +883,9 @@ function drawLightSource(frontPass)
     local pulse = 0.5 + 0.5 * math.sin(state.time * 3.2)
     local ringR = lightSourceHitRadius(projectScale) + pulse * (2.8 * projectScale)
     setLitColorDirect(
-      SELECTED_ORBIT_COLOR[1],
-      SELECTED_ORBIT_COLOR[2],
-      SELECTED_ORBIT_COLOR[3],
+      Config.SELECTED_ORBIT_COLOR[1],
+      Config.SELECTED_ORBIT_COLOR[2],
+      Config.SELECTED_ORBIT_COLOR[3],
       clamp(baseLight * 1.04, 0.4, 1.25),
       0.92
     )
@@ -1534,20 +903,20 @@ function activeSpeedWaveRippleParams()
 
   local t = clamp(ripple.age / ripple.life, 0, 1)
   local travel = smoothstep(t)
-  local coreR = clamp((state.planetVisualRadius or BODY_VISUAL.planetRadius) / GAME_H, 0.002, 0.45)
-  local maxDx = math.max(cx, GAME_W - cx)
-  local maxDy = math.max(cy, GAME_H - cy)
-  local edgeR = math.sqrt(maxDx * maxDx + maxDy * maxDy) / GAME_H + SPEED_WAVE_RIPPLE_END_PADDING
+  local coreR = clamp((state.planetVisualRadius or Config.BODY_VISUAL.planetRadius) / Config.GAME_H, 0.002, 0.45)
+  local maxDx = math.max(cx, Config.GAME_W - cx)
+  local maxDy = math.max(cy, Config.GAME_H - cy)
+  local edgeR = math.sqrt(maxDx * maxDx + maxDy * maxDy) / Config.GAME_H + Config.SPEED_WAVE_RIPPLE_END_PADDING
   local radius = lerp(coreR * 1.15, edgeR, travel)
-  local halfWidth = lerp(SPEED_WAVE_RIPPLE_WIDTH_START, SPEED_WAVE_RIPPLE_WIDTH_END, travel)
+  local halfWidth = lerp(Config.SPEED_WAVE_RIPPLE_WIDTH_START, Config.SPEED_WAVE_RIPPLE_WIDTH_END, travel)
   local rampIn = smoothstep(clamp(t / 0.08, 0, 1))
   local rampOut = 1 - smoothstep(clamp((t - 0.78) / 0.22, 0, 1))
   local strength = rampIn * rampOut
   return true,
     radius,
     halfWidth,
-    SPEED_WAVE_RIPPLE_RADIAL_STRENGTH * strength,
-    SPEED_WAVE_RIPPLE_SWIRL_STRENGTH * strength
+    Config.SPEED_WAVE_RIPPLE_RADIAL_STRENGTH * strength,
+    Config.SPEED_WAVE_RIPPLE_SWIRL_STRENGTH * strength
 end
 
 function drawOrbitalTrail(orbiter, trailLen, headAlpha, tailAlpha, originX, originY, originZ, lightScale)
@@ -1637,7 +1006,7 @@ function drawMoon(moon)
   end
 
   local moonR, moonG, moonB = computeOrbiterColor(moon.angle)
-  drawLitSphere(moon.x, moon.y, moon.z, BODY_VISUAL.moonRadius, moonR, moonG, moonB, moon.light, 20)
+  drawLitSphere(moon.x, moon.y, moon.z, Config.BODY_VISUAL.moonRadius, moonR, moonG, moonB, moon.light, 20)
 
   if showChildOrbitPaths then
     for _, child in ipairs(childSatellites) do
@@ -1656,7 +1025,7 @@ function drawMoonChildSatellite(child)
     drawOrbitalTrail(child, baseTrailLen, 0.44, 0.02, originX, originY, originZ, child.light)
   end
   local childR, childG, childB = computeOrbiterColor(child.angle)
-  drawLitSphere(child.x, child.y, child.z, BODY_VISUAL.moonChildSatelliteRadius, childR, childG, childB, child.light, 12)
+  drawLitSphere(child.x, child.y, child.z, Config.BODY_VISUAL.moonChildSatelliteRadius, childR, childG, childB, child.light, 12)
 end
 
 function drawOrbitPlanet(planet)
@@ -1665,7 +1034,7 @@ function drawOrbitPlanet(planet)
     drawOrbitalTrail(planet, baseTrailLen, 0.5, 0.04, nil, nil, 0, planet.light)
   end
   local pr, pg, pb = computeOrbiterColor(planet.angle)
-  drawLitSphere(planet.x, planet.y, planet.z, BODY_VISUAL.orbitPlanetRadius, pr, pg, pb, planet.light, 24)
+  drawLitSphere(planet.x, planet.y, planet.z, Config.BODY_VISUAL.orbitPlanetRadius, pr, pg, pb, planet.light, 24)
 end
 
 function drawMegaPlanet(megaPlanet)
@@ -1674,7 +1043,7 @@ function drawMegaPlanet(megaPlanet)
     drawOrbitalTrail(megaPlanet, baseTrailLen, 0.56, 0.05, nil, nil, 0, megaPlanet.light)
   end
   local pr, pg, pb = computeOrbiterColor(megaPlanet.angle)
-  drawLitSphere(megaPlanet.x, megaPlanet.y, megaPlanet.z, BODY_VISUAL.megaPlanetRadius, pr, pg, pb, megaPlanet.light, 36)
+  drawLitSphere(megaPlanet.x, megaPlanet.y, megaPlanet.z, Config.BODY_VISUAL.megaPlanetRadius, pr, pg, pb, megaPlanet.light, 36)
 end
 
 function drawSatellite(satellite)
@@ -1683,26 +1052,26 @@ function drawSatellite(satellite)
     drawOrbitalTrail(satellite, baseTrailLen, 0.44, 0.02, nil, nil, 0, satellite.light)
   end
   local satR, satG, satB = computeOrbiterColor(satellite.angle)
-  drawLitSphere(satellite.x, satellite.y, satellite.z, BODY_VISUAL.satelliteRadius, satR, satG, satB, satellite.light, 18)
+  drawLitSphere(satellite.x, satellite.y, satellite.z, Config.BODY_VISUAL.satelliteRadius, satR, satG, satB, satellite.light, 18)
 end
 
 function orbiterHitRadius(orbiter)
   local baseRadius
   local margin
   if orbiter.kind == "moon" then
-    baseRadius = BODY_VISUAL.moonRadius
+    baseRadius = Config.BODY_VISUAL.moonRadius
     margin = 2
   elseif orbiter.kind == "mega-planet" then
-    baseRadius = BODY_VISUAL.megaPlanetRadius
+    baseRadius = Config.BODY_VISUAL.megaPlanetRadius
     margin = 2
   elseif orbiter.kind == "planet" then
-    baseRadius = BODY_VISUAL.orbitPlanetRadius
+    baseRadius = Config.BODY_VISUAL.orbitPlanetRadius
     margin = 2
   elseif orbiter.kind == "satellite" then
-    baseRadius = BODY_VISUAL.satelliteRadius
+    baseRadius = Config.BODY_VISUAL.satelliteRadius
     margin = 1.5
   elseif orbiter.kind == "moon-satellite" then
-    baseRadius = BODY_VISUAL.moonChildSatelliteRadius
+    baseRadius = Config.BODY_VISUAL.moonChildSatelliteRadius
     margin = 2
   else
     return nil
@@ -1785,8 +1154,8 @@ function drawHoverTooltip(lines, anchorBtn, uiScale, lineH, preferLeft)
   tipW = tipW + tipPadX * 2
   local tipH = tipPadY * 2 + lineH * #lines + tipGap * math.max(0, #lines - 1)
   local tipGapX = math.floor(10 * uiScale)
-  local viewportRight = offsetX + GAME_W * scale
-  local viewportBottom = offsetY + GAME_H * scale
+  local viewportRight = offsetX + Config.GAME_W * scale
+  local viewportBottom = offsetY + Config.GAME_H * scale
   local tipX
   if preferLeft then
     tipX = anchorBtn.x - tipW - tipGapX
@@ -1829,8 +1198,8 @@ local function drawHud()
   local mouseX, mouseY = love.mouse.getPosition()
   local viewportX = offsetX
   local viewportY = offsetY
-  local viewportW = GAME_W * scale
-  local viewportH = GAME_H * scale
+  local viewportW = Config.GAME_W * scale
+  local viewportH = Config.GAME_H * scale
   local totalRpm = computeTotalRpm()
   local rpmInt = math.floor(totalRpm + 0.5)
   local rpmFont = getRpmDisplayFont()
@@ -1869,8 +1238,8 @@ local function drawHud()
   end
 
   local endBtn = ui.endTurnBtn
-  endBtn.w = math.floor(END_TURN_W * uiScale)
-  endBtn.h = math.floor(END_TURN_H * uiScale)
+  endBtn.w = math.floor(Config.END_TURN_W * uiScale)
+  endBtn.h = math.floor(Config.END_TURN_H * uiScale)
   endBtn.x = viewportX + viewportW - endBtn.w - math.floor(10 * uiScale)
   endBtn.y = viewportY + viewportH - endBtn.h - math.floor(12 * uiScale)
   local canEndTurn = not state.runComplete
@@ -1884,14 +1253,14 @@ local function drawHud()
   local endLabel = "end turn"
   drawText(endLabel, endBtn.x + math.floor((endBtn.w - font:getWidth(endLabel)) * 0.5), endBtn.y + math.floor((endBtn.h - lineH) * 0.5))
 
-  local cardW = math.floor(CARD_W * uiScale)
-  local cardH = math.floor(CARD_H * uiScale)
-  local cardGap = math.floor(CARD_GAP * uiScale)
+  local cardW = math.floor(Config.CARD_W * uiScale)
+  local cardH = math.floor(Config.CARD_H * uiScale)
+  local cardGap = math.floor(Config.CARD_GAP * uiScale)
   local handCount = #state.hand
   local handW = handCount > 0 and (handCount * cardW + (handCount - 1) * cardGap) or 0
   local cardY = viewportY + viewportH - cardH - math.floor(12 * uiScale)
   local startX = viewportX + math.floor((viewportW - handW) * 0.5)
-  local fixedSlots = STARTING_HAND_SIZE
+  local fixedSlots = Config.STARTING_HAND_SIZE
   local fixedHandW = fixedSlots * cardW + (fixedSlots - 1) * cardGap
   local fixedStartX = viewportX + math.floor((viewportW - fixedHandW) * 0.5)
 
@@ -1935,7 +1304,7 @@ local function drawHud()
   end
   for i = 1, handCount do
     local cardId = state.hand[i]
-    local cardDef = CARD_DEFS[cardId]
+    local cardDef = Config.CARD_DEFS[cardId]
     local btn = ui.cardButtons[i] or {}
     ui.cardButtons[i] = btn
     local hoverLift = state.cardHoverLift[i] or 0
@@ -1981,8 +1350,8 @@ function drawMainMenu()
   local mouseX, mouseY = love.mouse.getPosition()
   local viewportX = offsetX
   local viewportY = offsetY
-  local viewportW = GAME_W * scale
-  local viewportH = GAME_H * scale
+  local viewportW = Config.GAME_W * scale
+  local viewportH = Config.GAME_H * scale
 
   local title = "orbit protocol"
   local titleFont = getRpmDisplayFont()
@@ -2022,8 +1391,8 @@ function drawDeckMenu()
   local mouseX, mouseY = love.mouse.getPosition()
   local viewportX = offsetX
   local viewportY = offsetY
-  local viewportW = GAME_W * scale
-  local viewportH = GAME_H * scale
+  local viewportW = Config.GAME_W * scale
+  local viewportH = Config.GAME_H * scale
   local panelPad = math.floor(22 * uiScale)
   local panelX = viewportX + panelPad
   local panelY = viewportY + panelPad
@@ -2036,8 +1405,7 @@ function drawDeckMenu()
   love.graphics.rectangle("line", panelX, panelY, panelW, panelH)
 
   local headerPad = math.floor(12 * uiScale)
-  setColorScaled(palette.text, 1, 0.95)
-  drawText("deck menu", panelX + headerPad, panelY + headerPad)
+  local title = "deck menu"
 
   local backBtn = ui.menuBackBtn
   backBtn.w = math.floor(88 * uiScale)
@@ -2050,14 +1418,38 @@ function drawDeckMenu()
   setColorScaled(swatch.darkest, 1, 1)
   love.graphics.rectangle("line", backBtn.x, backBtn.y, backBtn.w, backBtn.h)
   drawText("back", backBtn.x + math.floor((backBtn.w - font:getWidth("back")) * 0.5), backBtn.y + math.floor((backBtn.h - lineH) * 0.5))
+  local currency = runtime.deckBuilder and runtime.deckBuilder:getCurrency() or state.currency
+  local minDeckSize = runtime.deckBuilder and runtime.deckBuilder:getMinDeckSize() or 10
+  local maxDeckSize = runtime.deckBuilder and runtime.deckBuilder:getMaxDeckSize() or 20
+  local deckSize = runtime.deckBuilder and runtime.deckBuilder:getDeckSize() or 0
+  local currencyText = "currency " .. tostring(currency)
+  local deckSizeText = string.format("deck %d/%d-%d", deckSize, minDeckSize, maxDeckSize)
+  local titleX = panelX + headerPad
+  local headerY = backBtn.y + math.floor((backBtn.h - lineH) * 0.5)
+  local statText = currencyText .. "   " .. deckSizeText
+  local statGap = math.floor(18 * uiScale)
+  local statX = backBtn.x - statGap - font:getWidth(statText)
+  local minStatX = titleX + font:getWidth(title) + math.floor(18 * uiScale)
+  if statX < minStatX then
+    statX = minStatX
+  end
+
+  setColorScaled(palette.text, 1, 0.95)
+  drawText(title, titleX, headerY)
+  setColorScaled(palette.text, 1, 0.90)
+  drawText(statText, statX, headerY)
 
   local contentX = panelX + headerPad
-  local contentY = panelY + lineH + math.floor(24 * uiScale)
+  local contentY = backBtn.y + backBtn.h + math.floor(14 * uiScale)
   local contentW = panelW - headerPad * 2
   local contentH = panelH - (contentY - panelY) - headerPad
   local colGap = math.floor(10 * uiScale)
   local colW = math.floor((contentW - colGap * 2) / 3)
   local headers = {"deck", "inventory", "shop"}
+
+  local deckEntries = runtime.deckBuilder and runtime.deckBuilder:listDeckEntries() or {}
+  local inventoryEntries = runtime.deckBuilder and runtime.deckBuilder:listInventoryEntries() or {}
+  local inventoryCounts = runtime.deckBuilder and runtime.deckBuilder:getInventoryCounts() or {}
   local hoveredTooltipLines
   local hoveredTooltipBtn
 
@@ -2077,34 +1469,91 @@ function drawDeckMenu()
       local cardW = colW - math.floor(20 * uiScale)
       local cardH = lineH * 3 + math.floor(16 * uiScale)
       local cardGap = math.floor(8 * uiScale)
-      for n = #ui.deckCardButtons, #STARTER_CARD_ORDER + 1, -1 do
+      for n = #ui.deckCardButtons, #deckEntries + 1, -1 do
         ui.deckCardButtons[n] = nil
       end
-      for n = 1, #STARTER_CARD_ORDER do
-        local cardId = STARTER_CARD_ORDER[n]
-        local cardDef = CARD_DEFS[cardId]
-        local copies = cardDef.starterCopies or 0
+      if #deckEntries == 0 then
+        setColorScaled(palette.text, 1, 0.55)
+        drawText("empty", colX + math.floor(10 * uiScale), colY + lineH + math.floor(18 * uiScale))
+      end
+      for n = 1, #deckEntries do
+        local entry = deckEntries[n]
+        local cardId = entry.id
+        local cardDef = Config.CARD_DEFS[cardId]
+        local copies = entry.count
         local btn = ui.deckCardButtons[n] or {}
         ui.deckCardButtons[n] = btn
         btn.x = listX
         btn.y = listY + (n - 1) * (cardH + cardGap)
         btn.w = cardW
         btn.h = cardH
+        btn.cardId = cardId
+        local removable = runtime.deckBuilder and runtime.deckBuilder:canRemoveFromDeck(cardId)
         local hovered = pointInRect(mouseX, mouseY, btn)
-        setColorScaled(swatch.darkest, 1, hovered and 0.98 or 0.9)
+        local alpha = removable and 1 or 0.45
+        setColorScaled(swatch.darkest, 1, (hovered and 0.98 or 0.9) * alpha)
         love.graphics.rectangle("fill", btn.x, btn.y, btn.w, btn.h)
-        setColorScaled(swatch.brightest, 1, hovered and 1 or 0.7)
+        setColorScaled(swatch.brightest, 1, (hovered and 1 or 0.7) * alpha)
         love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h)
-        setColorScaled(palette.text, 1, 0.95)
+        setColorScaled(palette.text, 1, 0.95 * alpha)
         drawText("x" .. tostring(copies) .. "  cost " .. tostring(cardDef.cost), btn.x + math.floor(8 * uiScale), btn.y + math.floor(4 * uiScale))
         drawText(cardDef.name, btn.x + math.floor(8 * uiScale), btn.y + lineH + math.floor(8 * uiScale))
         drawText(cardDef.line, btn.x + math.floor(8 * uiScale), btn.y + lineH * 2 + math.floor(12 * uiScale))
         if hovered then
+          local actionLine = removable and "remove" or ("min deck " .. tostring(minDeckSize))
           hoveredTooltipBtn = btn
           hoveredTooltipLines = {
             {pre = cardDef.tooltip, hi = "", post = ""},
             {pre = "cost ", hi = tostring(cardDef.cost), post = " energy"},
-            {pre = "starter copies ", hi = tostring(copies), post = ""},
+            {pre = "deck copies ", hi = tostring(copies), post = ""},
+            {pre = "click ", hi = actionLine, post = removable and " to inventory" or ""},
+          }
+        end
+      end
+    elseif headers[i] == "inventory" then
+      local listX = colX + math.floor(10 * uiScale)
+      local listY = colY + lineH + math.floor(18 * uiScale)
+      local cardW = colW - math.floor(20 * uiScale)
+      local cardH = lineH * 3 + math.floor(16 * uiScale)
+      local cardGap = math.floor(8 * uiScale)
+      for n = #ui.deckInventoryButtons, #inventoryEntries + 1, -1 do
+        ui.deckInventoryButtons[n] = nil
+      end
+      if #inventoryEntries == 0 then
+        setColorScaled(palette.text, 1, 0.55)
+        drawText("empty", colX + math.floor(10 * uiScale), colY + lineH + math.floor(18 * uiScale))
+      end
+      for n = 1, #inventoryEntries do
+        local entry = inventoryEntries[n]
+        local cardId = entry.id
+        local cardDef = Config.CARD_DEFS[cardId]
+        local copies = entry.count
+        local btn = ui.deckInventoryButtons[n] or {}
+        ui.deckInventoryButtons[n] = btn
+        btn.x = listX
+        btn.y = listY + (n - 1) * (cardH + cardGap)
+        btn.w = cardW
+        btn.h = cardH
+        btn.cardId = cardId
+        local addable = runtime.deckBuilder and runtime.deckBuilder:canAddToDeck(cardId)
+        local hovered = pointInRect(mouseX, mouseY, btn)
+        local alpha = addable and 1 or 0.45
+        setColorScaled(swatch.darkest, 1, (hovered and 0.98 or 0.9) * alpha)
+        love.graphics.rectangle("fill", btn.x, btn.y, btn.w, btn.h)
+        setColorScaled(swatch.brightest, 1, (hovered and 1 or 0.7) * alpha)
+        love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h)
+        setColorScaled(palette.text, 1, 0.95 * alpha)
+        drawText("x" .. tostring(copies) .. "  cost " .. tostring(cardDef.cost), btn.x + math.floor(8 * uiScale), btn.y + math.floor(4 * uiScale))
+        drawText(cardDef.name, btn.x + math.floor(8 * uiScale), btn.y + lineH + math.floor(8 * uiScale))
+        drawText(cardDef.line, btn.x + math.floor(8 * uiScale), btn.y + lineH * 2 + math.floor(12 * uiScale))
+        if hovered then
+          local actionLine = addable and "add" or ("max deck " .. tostring(maxDeckSize))
+          hoveredTooltipBtn = btn
+          hoveredTooltipLines = {
+            {pre = cardDef.tooltip, hi = "", post = ""},
+            {pre = "cost ", hi = tostring(cardDef.cost), post = " energy"},
+            {pre = "inventory copies ", hi = tostring(copies), post = ""},
+            {pre = "click ", hi = actionLine, post = addable and " to deck" or ""},
           }
         end
       end
@@ -2114,33 +1563,39 @@ function drawDeckMenu()
       local rowW = colW - math.floor(20 * uiScale)
       local rowH = lineH + math.floor(8 * uiScale)
       local rowGap = math.floor(4 * uiScale)
-      for n = #ui.deckShopButtons, #SHOP_CARD_ORDER + 1, -1 do
+      for n = #ui.deckShopButtons, #Config.SHOP_CARD_ORDER + 1, -1 do
         ui.deckShopButtons[n] = nil
       end
-      for n = 1, #SHOP_CARD_ORDER do
-        local cardId = SHOP_CARD_ORDER[n]
-        local cardDef = CARD_DEFS[cardId]
+      for n = 1, #Config.SHOP_CARD_ORDER do
+        local cardId = Config.SHOP_CARD_ORDER[n]
+        local cardDef = Config.CARD_DEFS[cardId]
         local btn = ui.deckShopButtons[n] or {}
         ui.deckShopButtons[n] = btn
         btn.x = rowX
         btn.y = rowY + (n - 1) * (rowH + rowGap)
         btn.w = rowW
         btn.h = rowH
+        btn.cardId = cardId
+        local price = cardDef.shopPrice or 0
+        local affordable = currency >= price
         local hovered = pointInRect(mouseX, mouseY, btn)
-        setColorScaled(swatch.darkest, 1, hovered and 0.98 or 0.9)
+        local alpha = affordable and 1 or 0.45
+        setColorScaled(swatch.darkest, 1, (hovered and 0.98 or 0.9) * alpha)
         love.graphics.rectangle("fill", btn.x, btn.y, btn.w, btn.h)
-        setColorScaled(swatch.brightest, 1, hovered and 1 or 0.7)
+        setColorScaled(swatch.brightest, 1, (hovered and 1 or 0.7) * alpha)
         love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h)
-        setColorScaled(palette.text, 1, 0.95)
+        setColorScaled(palette.text, 1, 0.95 * alpha)
         drawText(cardDef.name, btn.x + math.floor(8 * uiScale), btn.y + math.floor(4 * uiScale))
-        local priceText = tostring(cardDef.shopPrice or 0)
+        local priceText = tostring(price)
         drawText(priceText, btn.x + btn.w - font:getWidth(priceText) - math.floor(8 * uiScale), btn.y + math.floor(4 * uiScale))
         if hovered then
           hoveredTooltipBtn = btn
           hoveredTooltipLines = {
             {pre = cardDef.tooltip, hi = "", post = ""},
             {pre = "cost ", hi = tostring(cardDef.cost), post = " energy"},
-            {pre = "shop ", hi = tostring(cardDef.shopPrice or 0), post = ""},
+            {pre = "shop ", hi = tostring(price), post = ""},
+            {pre = "owned ", hi = tostring(inventoryCounts[cardId] or 0), post = ""},
+            {pre = "click ", hi = "buy", post = ""},
           }
         end
       end
@@ -2151,6 +1606,73 @@ function drawDeckMenu()
   end
 
   drawHoverTooltip(hoveredTooltipLines, hoveredTooltipBtn, uiScale, lineH, false)
+end
+
+function drawEndGame()
+  local font = love.graphics.getFont()
+  local uiScale = scale >= 1 and scale or 1
+  local lineH = math.floor(font:getHeight())
+  local mouseX, mouseY = love.mouse.getPosition()
+  local viewportX = offsetX
+  local viewportY = offsetY
+  local viewportW = Config.GAME_W * scale
+  local viewportH = Config.GAME_H * scale
+
+  local panelW = math.floor(viewportW * 0.48)
+  local panelH = math.floor(viewportH * 0.46)
+  local panelX = viewportX + math.floor((viewportW - panelW) * 0.5)
+  local panelY = viewportY + math.floor((viewportH - panelH) * 0.5)
+  local pad = math.floor(16 * uiScale)
+
+  setColorScaled(swatch.darkest, 1, 0.95)
+  love.graphics.rectangle("fill", panelX, panelY, panelW, panelH)
+  setColorScaled(swatch.brightest, 1, 0.92)
+  love.graphics.rectangle("line", panelX, panelY, panelW, panelH)
+
+  local title = state.runOutcome == "collapse" and "run collapsed" or (state.runWon and "goal reached" or "run complete")
+  local scoreText = "score " .. tostring(state.highestRpm) .. " rpm"
+  local rewardText = "reward +" .. tostring(state.rewardRpm)
+  local currencyText = "currency " .. tostring(state.currency)
+
+  setColorScaled(swatch.brightest, 1, 1)
+  drawText(title, panelX + pad, panelY + pad)
+  setColorScaled(palette.text, 1, 0.95)
+  drawText(scoreText, panelX + pad, panelY + pad + lineH + math.floor(8 * uiScale))
+  drawText(rewardText, panelX + pad, panelY + pad + lineH * 2 + math.floor(14 * uiScale))
+  drawText(currencyText, panelX + pad, panelY + pad + lineH * 3 + math.floor(20 * uiScale))
+
+  local btnW = math.floor(180 * uiScale)
+  local btnH = lineH + math.floor(10 * uiScale)
+  local btnGap = math.floor(10 * uiScale)
+  local btnY = panelY + panelH - btnH - pad
+  local totalW = btnW * 2 + btnGap
+  local btnX = panelX + math.floor((panelW - totalW) * 0.5)
+
+  local replayBtn = ui.endGameReplayBtn
+  replayBtn.x = btnX
+  replayBtn.y = btnY
+  replayBtn.w = btnW
+  replayBtn.h = btnH
+  local replayHovered = pointInRect(mouseX, mouseY, replayBtn)
+  setColorScaled(swatch.darkest, 1, replayHovered and 1 or 0.9)
+  love.graphics.rectangle("fill", replayBtn.x, replayBtn.y, replayBtn.w, replayBtn.h)
+  setColorScaled(swatch.brightest, 1, replayHovered and 1 or 0.8)
+  love.graphics.rectangle("line", replayBtn.x, replayBtn.y, replayBtn.w, replayBtn.h)
+  setColorScaled(palette.text, 1, 0.95)
+  drawText("play again", replayBtn.x + math.floor((replayBtn.w - font:getWidth("play again")) * 0.5), replayBtn.y + math.floor((replayBtn.h - lineH) * 0.5))
+
+  local menuBtn = ui.endGameMenuBtn
+  menuBtn.x = btnX + btnW + btnGap
+  menuBtn.y = btnY
+  menuBtn.w = btnW
+  menuBtn.h = btnH
+  local menuHovered = pointInRect(mouseX, mouseY, menuBtn)
+  setColorScaled(swatch.darkest, 1, menuHovered and 1 or 0.9)
+  love.graphics.rectangle("fill", menuBtn.x, menuBtn.y, menuBtn.w, menuBtn.h)
+  setColorScaled(swatch.brightest, 1, menuHovered and 1 or 0.8)
+  love.graphics.rectangle("line", menuBtn.x, menuBtn.y, menuBtn.w, menuBtn.h)
+  setColorScaled(palette.text, 1, 0.95)
+  drawText("main menu", menuBtn.x + math.floor((menuBtn.w - font:getWidth("main menu")) * 0.5), menuBtn.y + math.floor((menuBtn.h - lineH) * 0.5))
 end
 
 function getOrbiterTooltipLayout()
@@ -2172,7 +1694,7 @@ function getOrbiterTooltipLayout()
     title = "selected mega planet"
   end
 
-  local currentRpm = orbiter.speed * (1 + totalBoost) * RAD_PER_SECOND_TO_RPM
+  local currentRpm = orbiter.speed * (1 + totalBoost) * Config.RAD_PER_SECOND_TO_RPM
   local detailLines = {
     {pre = "orbit radius ", hi = string.format("%.0f px", orbiter.radius), post = ""},
     {pre = "current speed ", hi = string.format("%.2f rpm", currentRpm), post = ""},
@@ -2213,7 +1735,7 @@ function getOrbiterTooltipLayout()
   local titleGap = math.floor(2 * uiScale)
   local boxW = textW + padX * 2
   local boxH = padY * 2 + lineH + titleGap + #detailLines * lineH + lineGap * math.max(0, #detailLines - 1)
-  local boxX = math.floor(offsetX + GAME_W * scale - boxW - 8 * uiScale)
+  local boxX = math.floor(offsetX + Config.GAME_W * scale - boxW - 8 * uiScale)
   local boxY = math.floor(offsetY + 8 * uiScale)
   local anchorX = boxX
   local anchorY = boxY + math.floor(boxH * 0.5)
@@ -2251,7 +1773,7 @@ function drawOrbiterTooltipConnector(frontPass)
   end
 
   local connectorLight = orbiter.light or cameraLightAt(orbiter.x, orbiter.y, orbiter.z)
-  setLitColorDirect(SELECTED_ORBIT_COLOR[1], SELECTED_ORBIT_COLOR[2], SELECTED_ORBIT_COLOR[3], connectorLight, 0.88)
+  setLitColorDirect(Config.SELECTED_ORBIT_COLOR[1], Config.SELECTED_ORBIT_COLOR[2], Config.SELECTED_ORBIT_COLOR[3], connectorLight, 0.88)
   local px, py = projectWorldPoint(orbiter.x, orbiter.y, orbiter.z)
   love.graphics.line(layout.anchorWorldX, layout.anchorWorldY, px, py)
 end
@@ -2474,7 +1996,7 @@ local function initBackgroundMusic()
 
   bgMusic = source
   bgMusic:setLooping(false)
-  bgMusic:setVolume(BG_MUSIC_VOLUME)
+  bgMusic:setVolume(Config.BG_MUSIC_VOLUME)
   bgMusic:play()
   bgMusicFirstPass = true
   bgMusicPrevPos = 0
@@ -2486,8 +2008,8 @@ local function updateBackgroundMusic(dt)
   end
 
   bgMusicDuckTimer = math.max(0, bgMusicDuckTimer - dt)
-  local duckT = bgMusicDuckTimer > 0 and (bgMusicDuckTimer / BG_MUSIC_DUCK_SECONDS) or 0
-  local duckGain = lerp(1, BG_MUSIC_DUCK_GAIN, duckT)
+  local duckT = bgMusicDuckTimer > 0 and (bgMusicDuckTimer / Config.BG_MUSIC_DUCK_SECONDS) or 0
+  local duckGain = lerp(1, Config.BG_MUSIC_DUCK_GAIN, duckT)
 
   if bgMusicFirstPass then
     if not bgMusic:isPlaying() then
@@ -2496,23 +2018,23 @@ local function updateBackgroundMusic(dt)
       bgMusic:play()
       bgMusicPrevPos = 0
     end
-    bgMusic:setVolume(BG_MUSIC_VOLUME * duckGain)
+    bgMusic:setVolume(Config.BG_MUSIC_VOLUME * duckGain)
     return
   end
 
   local duration = bgMusic:getDuration("seconds")
   if not duration or duration <= 0 then
-    bgMusic:setVolume(BG_MUSIC_VOLUME * duckGain)
+    bgMusic:setVolume(Config.BG_MUSIC_VOLUME * duckGain)
     return
   end
 
   local pos = bgMusic:tell("seconds")
   local remaining = duration - pos
-  local fadeWindow = BG_MUSIC_LOOP_FADE_SECONDS
+  local fadeWindow = Config.BG_MUSIC_LOOP_FADE_SECONDS
   local fadeOut = remaining < fadeWindow and (remaining / fadeWindow) or 1
   local fadeIn = pos < fadeWindow and (pos / fadeWindow) or 1
   local loopGain = clamp(math.min(fadeOut, fadeIn), 0, 1)
-  bgMusic:setVolume(BG_MUSIC_VOLUME * loopGain * duckGain)
+  bgMusic:setVolume(Config.BG_MUSIC_VOLUME * loopGain * duckGain)
   bgMusicPrevPos = pos
 end
 
@@ -2522,7 +2044,7 @@ local function initUpgradeFx()
     upgradeFx = nil
     return
   end
-  source:setVolume(UPGRADE_FX_VOLUME)
+  source:setVolume(Config.UPGRADE_FX_VOLUME)
   upgradeFx = source
 end
 
@@ -2541,11 +2063,11 @@ local function playClickFx(isClosing)
   end
   local voice = clickFx:clone()
   if isClosing then
-    voice:setPitch(CLICK_FX_PITCH_CLOSE)
-    voice:setVolume(CLICK_FX_VOLUME_CLOSE)
+    voice:setPitch(Config.CLICK_FX_PITCH_CLOSE)
+    voice:setVolume(Config.CLICK_FX_VOLUME_CLOSE)
   else
-    voice:setPitch(CLICK_FX_PITCH_OPEN)
-    voice:setVolume(CLICK_FX_VOLUME_OPEN)
+    voice:setPitch(Config.CLICK_FX_PITCH_OPEN)
+    voice:setVolume(Config.CLICK_FX_VOLUME_OPEN)
   end
   love.audio.play(voice)
 end
@@ -2555,9 +2077,9 @@ playMenuBuyClickFx = function()
     return
   end
   local voice = clickFx:clone()
-  local pitch = lerp(CLICK_FX_MENU_PITCH_MIN, CLICK_FX_MENU_PITCH_MAX, love.math.random())
+  local pitch = lerp(Config.CLICK_FX_MENU_PITCH_MIN, Config.CLICK_FX_MENU_PITCH_MAX, love.math.random())
   voice:setPitch(pitch)
-  voice:setVolume(CLICK_FX_VOLUME_OPEN)
+  voice:setVolume(Config.CLICK_FX_VOLUME_OPEN)
   love.audio.play(voice)
 end
 
@@ -2576,19 +2098,19 @@ local function updateFadedFxInstances(instances, targetVolume, fadeSeconds, dt)
 end
 
 local function updateUpgradeFx(dt)
-  updateFadedFxInstances(upgradeFxInstances, UPGRADE_FX_VOLUME, UPGRADE_FX_FADE_IN_SECONDS, dt)
+  updateFadedFxInstances(upgradeFxInstances, Config.UPGRADE_FX_VOLUME, Config.UPGRADE_FX_FADE_IN_SECONDS, dt)
 end
 
 function love.load()
   love.graphics.setDefaultFilter("nearest", "nearest")
-  uiFont = love.graphics.newFont("font_gothic.ttf", UI_FONT_SIZE, "mono")
+  uiFont = love.graphics.newFont("font_gothic.ttf", Config.UI_FONT_SIZE, "mono")
   uiFont:setFilter("nearest", "nearest")
   love.graphics.setFont(uiFont)
   love.graphics.setLineStyle("rough")
   love.graphics.setLineJoin("none")
   setBorderlessFullscreen(false)
 
-  canvas = love.graphics.newCanvas(GAME_W, GAME_H)
+  canvas = love.graphics.newCanvas(Config.GAME_W, Config.GAME_H)
   canvas:setFilter("nearest", "nearest")
   initSphereShader()
   initGravityWellShader()
@@ -2602,8 +2124,8 @@ function love.load()
 
   for _ = 1, 72 do
     table.insert(state.stars, {
-      x = love.math.random(0, GAME_W - 1),
-      y = love.math.random(0, GAME_H - 1),
+      x = love.math.random(0, Config.GAME_W - 1),
+      y = love.math.random(0, Config.GAME_H - 1),
       phase = love.math.random() * math.pi * 2,
       speed = 0.35 + love.math.random() * 0.6,
       kind = love.math.random(0, 1),
@@ -2617,7 +2139,7 @@ end
 
 function love.keypressed(key)
   if key == "escape" then
-    if state.screen == "deck_menu" or state.screen == "run" then
+    if state.screen == "deck_menu" or state.screen == "run" or state.screen == "end_game" then
       openMainMenu()
     end
   elseif key == "b" then
@@ -2628,7 +2150,7 @@ function love.keypressed(key)
 end
 
 function love.wheelmoved(_, wy)
-  zoom = clamp(zoom + wy * 0.1, ZOOM_MIN, ZOOM_MAX)
+  zoom = clamp(zoom + wy * 0.1, Config.ZOOM_MIN, Config.ZOOM_MAX)
 end
 
 function love.update(dt)
@@ -2651,6 +2173,10 @@ function love.update(dt)
       table.remove(ripples, i)
     end
   end
+
+  if state.screen == "run" and state.runComplete then
+    switchScreen("end_game")
+  end
 end
 
 function love.mousepressed(x, y, button)
@@ -2672,6 +2198,51 @@ function love.mousepressed(x, y, button)
     return
   elseif state.screen == "deck_menu" then
     if pointInRect(x, y, ui.menuBackBtn) then
+      openMainMenu()
+      playClickFx(true)
+      return
+    end
+    for i = 1, #ui.deckCardButtons do
+      local btn = ui.deckCardButtons[i]
+      if btn and pointInRect(x, y, btn) then
+        if runtime.deckBuilder and runtime.deckBuilder:removeFromDeck(btn.cardId) then
+          playMenuBuyClickFx()
+        else
+          playClickFx(true)
+        end
+        return
+      end
+    end
+    for i = 1, #ui.deckInventoryButtons do
+      local btn = ui.deckInventoryButtons[i]
+      if btn and pointInRect(x, y, btn) then
+        if runtime.deckBuilder and runtime.deckBuilder:addToDeck(btn.cardId) then
+          playClickFx(false)
+        else
+          playClickFx(true)
+        end
+        return
+      end
+    end
+    for i = 1, #ui.deckShopButtons do
+      local btn = ui.deckShopButtons[i]
+      if btn and pointInRect(x, y, btn) then
+        if runtime.deckBuilder and runtime.deckBuilder:buyShopCard(btn.cardId) then
+          playMenuBuyClickFx()
+        else
+          playClickFx(true)
+        end
+        return
+      end
+    end
+    return
+  elseif state.screen == "end_game" then
+    if pointInRect(x, y, ui.endGameReplayBtn) then
+      startRunFromMenu()
+      playClickFx(false)
+      return
+    end
+    if pointInRect(x, y, ui.endGameMenuBtn) then
       openMainMenu()
       playClickFx(true)
     end
@@ -2697,14 +2268,14 @@ function love.mousepressed(x, y, button)
   end
 
   local gx, gy = toGameSpace(x, y)
-  if gx < 0 or gy < 0 or gx > GAME_W or gy > GAME_H then
+  if gx < 0 or gy < 0 or gx > Config.GAME_W or gy > Config.GAME_H then
     return
   end
 
   local wx, wy = toWorldSpace(x, y)
   local planetDx = wx - cx
   local planetDy = wy - cy
-  local planetHitR = BODY_VISUAL.planetRadius
+  local planetHitR = Config.BODY_VISUAL.planetRadius
   if planetDx * planetDx + planetDy * planetDy <= planetHitR * planetHitR then
     onPlanetClicked()
     return
@@ -2792,15 +2363,15 @@ function love.draw()
   love.graphics.setColor(1, 1, 1, 1)
   local rippleActive, waveCenterR, waveHalfWidth, waveRadialStrength, waveSwirlStrength = activeSpeedWaveRippleParams()
   if gravityWellShader then
-    local coreR = clamp((state.planetVisualRadius or BODY_VISUAL.planetRadius) / GAME_H, 0.002, 0.45)
-    local innerR = clamp(coreR * GRAVITY_WELL_INNER_SCALE, 0.001, coreR - 0.0005)
-    local outerR = clamp(coreR * GRAVITY_WELL_RADIUS_SCALE, coreR + 0.01, 0.95)
-    local radialStrength = GRAVITY_WELL_RADIAL_STRENGTH
-    local swirlStrength = GRAVITY_WELL_SWIRL_STRENGTH
+    local coreR = clamp((state.planetVisualRadius or Config.BODY_VISUAL.planetRadius) / Config.GAME_H, 0.002, 0.45)
+    local innerR = clamp(coreR * Config.GRAVITY_WELL_INNER_SCALE, 0.001, coreR - 0.0005)
+    local outerR = clamp(coreR * Config.GRAVITY_WELL_RADIUS_SCALE, coreR + 0.01, 0.95)
+    local radialStrength = Config.GRAVITY_WELL_RADIAL_STRENGTH
+    local swirlStrength = Config.GRAVITY_WELL_SWIRL_STRENGTH
     local prevShader = love.graphics.getShader()
     love.graphics.setShader(gravityWellShader)
-    gravityWellShader:send("centerUv", {cx / GAME_W, cy / GAME_H})
-    gravityWellShader:send("aspect", GAME_W / GAME_H)
+    gravityWellShader:send("centerUv", {cx / Config.GAME_W, cy / Config.GAME_H})
+    gravityWellShader:send("aspect", Config.GAME_W / Config.GAME_H)
     gravityWellShader:send("innerR", innerR)
     gravityWellShader:send("coreR", coreR)
     gravityWellShader:send("outerR", outerR)
@@ -2824,5 +2395,7 @@ function love.draw()
     drawMainMenu()
   elseif state.screen == "deck_menu" then
     drawDeckMenu()
+  elseif state.screen == "end_game" then
+    drawEndGame()
   end
 end

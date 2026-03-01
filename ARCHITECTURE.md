@@ -1,75 +1,75 @@
 # Orbit Idle Architecture
 
-This refactor keeps gameplay behavior while moving progression/economy/simulation into explicit systems.
+This refactor reduces `main.lua` local-variable pressure by moving static data and card-run gameplay logic into dedicated modules while keeping behavior stable.
 
-## System Layout
+## Current Module Layout
 
 - `main.lua`
-  - Owns rendering, input routing, and Love2D lifecycle hooks.
-  - Initializes runtime services in `initGameSystems()`.
-  - Delegates simulation (`update`) and purchases to services.
+  - Love2D entry point and orchestration layer.
+  - Owns rendering, input routing, audio runtime, and callback wiring.
+  - Delegates simulation and card-run logic to systems.
 
-- `game/systems/modifiers.lua`
-  - Central stat-modifier registry.
-  - Multiple sources can contribute additive (`add`) and multiplicative (`mul`) effects per stat key.
-
-- `game/systems/progression.lua`
-  - Skill-tree and auto-perk scaffolding.
-  - Tracks progression state (`skillPoints`, unlocked skills/perks, earned orbits).
-  - Pushes progression-derived modifiers into `ModifierSystem`.
-
-- `game/systems/economy.lua`
-  - Owns all cost lookups and orbit spending checks.
-  - Costs are stat-driven via modifier keys: `cost_<id>`.
+- `game/config/game_config.lua`
+  - Single source of truth for static configuration:
+    - world/camera/render constants
+    - card definitions and deck lists
+    - audio constants
+    - palette/swatch data
+    - orbiter/body config tables
 
 - `game/systems/orbiters.lua`
-  - Owns orbiter creation, impulse boosts, and orbit simulation.
-  - Emits orbit rewards and FX callbacks.
-  - Applies speed multipliers from modifier keys:
-    - `speed_global`
-    - `speed_<kind>` (`speed_satellite`, `speed_moon`, etc.)
+  - Orbiter creation and per-frame orbital simulation.
+  - Handles boost stacks, speed multipliers, and orbit advancement.
 
-- `game/systems/upgrades.lua`
-  - Owns speed wave / speed click / black hole upgrade behavior.
-  - Owns stability mechanics and ripple/text timers.
+- `game/systems/card_run.lua`
+  - Owns run lifecycle (`startCardRun`, turn transitions, collapse/completion).
+  - Owns deck/hand/discard flow and card effects.
+  - Pulls the active run deck from deck-builder state at run start.
+  - Owns body RPM aggregation and high-score tracking for run state.
+  - Awards end-of-run currency rewards once per run.
+
+- `game/systems/deck_builder.lua`
+  - Owns persistent deck/inventory/currency state.
+  - Enforces deck size bounds (min/max cards).
+  - Handles deck edit actions:
+    - remove card from deck -> inventory
+    - add card from inventory -> deck
+  - Handles shop purchases and affordability checks.
+
+- `game/systems/modifiers.lua`
+  - Shared additive/multiplicative stat aggregation service.
 
 ## Runtime Wiring
 
-`main.lua` creates a single runtime container:
+`main.lua` initializes:
 
+- `runtime.deckBuilder`
 - `runtime.modifiers`
-- `runtime.economy`
-- `runtime.progression`
-- `runtime.upgrades`
 - `runtime.orbiters`
+- `runtime.cardRun`
 
-Update order each frame:
+Core flow:
 
-1. `runtime.upgrades:update(dt)`
-2. `runtime.orbiters:update(dt)`
-3. `runtime.progression:update()`
+1. `runtime.orbiters:update(dt)` advances all bodies.
+2. `runtime.cardRun` is called from UI/input actions:
+   - `playCard`
+   - `endPlayerTurn`
+   - `startCardRun`
+3. `runtime.deckBuilder` is called from deck menu UI actions.
+4. Rendering/UI reads from shared `state` only.
 
-This keeps visual/UI code stable while gameplay logic lives in systems.
+## Practical Extension Rules
 
-## Adding Future Skill Trees / Perks
+- Add new constants/cards/orbit tuning in `game/config/game_config.lua`.
+- Add new run mechanics in `game/systems/card_run.lua`.
+- Add deck/currency/shop behavior in `game/systems/deck_builder.lua`.
+- Keep `main.lua` focused on:
+  - translating input events to system calls
+  - frame update/draw orchestration
+  - pure presentation code
 
-- Add skill nodes in `DEFAULT_SKILL_TREE` (`game/systems/progression.lua`).
-- Add auto-unlock perks in `DEFAULT_PERKS` with thresholds/conditions.
-- Define modifier payloads per node/perk using `{ add = x, mul = y }`.
-- Existing systems consume those modifiers automatically if keys match supported stats.
+## Why This Helps
 
-Examples:
-
-- Click specialization:
-  - `planet_click_impulse_boost`
-- Satellite specialization:
-  - `speed_satellite`
-  - `speed_moon_satellite`
-- Moon perks:
-  - `speed_moon`
-  - `cost_moonSatellite`
-
-## Behavior Preservation Notes
-
-- Existing orbit generation, UI interactions, and rendering are preserved.
-- Current perks are scaffolded and disabled by default in progression definitions.
+- Avoids repeatedly hitting Lua’s local-variable limits in `main.lua`.
+- Keeps gameplay logic testable and isolated from render code.
+- Makes future system splits incremental (audio/UI/render can be extracted next without touching card rules).
