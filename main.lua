@@ -102,8 +102,8 @@ local PLANET_IMPULSE_FALL_RATE = 6.5
 local PLANET_BOUNCE_DURATION = 0.12
 local GRAVITY_WELL_INNER_SCALE = 0.06
 local GRAVITY_WELL_RADIUS_SCALE = 1.18
-local GRAVITY_WELL_RADIAL_STRENGTH = 0.014
-local GRAVITY_WELL_SWIRL_STRENGTH = 0.00045
+local GRAVITY_WELL_RADIAL_STRENGTH = 0.009
+local GRAVITY_WELL_SWIRL_STRENGTH = 0.00028
 local SPEED_WAVE_RIPPLE_LIFETIME = 1.1
 local SPEED_WAVE_RIPPLE_WIDTH_START = 0.020
 local SPEED_WAVE_RIPPLE_WIDTH_END = 0.092
@@ -115,65 +115,160 @@ local ORBIT_ICON_CYCLE_SECONDS = 1.8
 local ORBIT_ICON_FLATTEN = 0.84
 local ORBIT_ICON_SIZE = 6
 local UI_FONT_SIZE = 24
-local MAX_MOONS = 5
-local MAX_SATELLITES = 20
-local STARTING_HAND_SIZE = 3
+local MAX_MOONS = 64
+local MAX_SATELLITES = 64
+local STARTING_HAND_SIZE = 5
 local TURN_ENERGY = 3
 local MAX_TURNS = 4
-local OBJECTIVE_RPM = 50
+local OBJECTIVE_RPM = 40
+local CORE_BASE_RPM = 6
+local HEAT_CAP = 10
+local END_TURN_HEAT_GAIN = 1
 local CARD_W = 176
 local CARD_H = 104
 local CARD_GAP = 10
 local END_TURN_W = 118
 local END_TURN_H = 34
 local CARD_DEFS = {
-  moon = {
-    id = "moon",
-    name = "moon",
-    cost = 1,
-    rpm = 10,
-    line = "add moon @10",
-    tooltip = "Adds a moon orbiting at 10 rpm.",
-  },
-  satellite = {
-    id = "satellite",
-    name = "satellite",
+  moonseed = {
+    id = "moonseed",
+    name = "moonseed",
     cost = 2,
-    rpm = 20,
-    line = "add sat @20",
-    tooltip = "Adds a satellite orbiting at 20 rpm.",
+    starterCopies = 4,
+    isMoonCard = true,
+    line = "summon moon 4 rpm",
+    tooltip = "Summon a Moon with 4 RPM. Gain 1 Heat.",
   },
-  speedWave = {
-    id = "speedWave",
-    name = "speed wave",
+  coolant_vent = {
+    id = "coolant_vent",
+    name = "coolant vent",
     cost = 1,
-    line = "+1 rpm all",
-    tooltip = "Adds +1 rpm to all orbiting entities.",
+    starterCopies = 4,
+    line = "vent 2",
+    tooltip = "Vent 2.",
   },
-  planet = {
-    id = "planet",
-    name = "planet",
+  spin_up = {
+    id = "spin_up",
+    name = "spin up",
     cost = 1,
-    rpm = 10,
-    line = "add planet @10",
-    tooltip = "Adds a planet orbiting at 10 rpm.",
+    starterCopies = 2,
+    line = "spin +1",
+    tooltip = "All Moons gain +1 RPM permanently this run. Gain 1 Heat.",
   },
-  megaPlanet = {
-    id = "megaPlanet",
-    name = "mega planet",
+  overclock = {
+    id = "overclock",
+    name = "overclock",
     cost = 1,
-    rpm = 5,
-    line = "add mega @5",
-    tooltip = "Adds a mega planet orbiting at 5 rpm.",
+    starterCopies = 2,
+    line = "overclock +2",
+    tooltip = "This turn, all Moons gain +2 RPM. Gain 1 Heat.",
+  },
+  heavy_moon = {
+    id = "heavy_moon",
+    name = "heavy moon",
+    cost = 2,
+    shopPrice = 30,
+    isMoonCard = true,
+    line = "summon heavy 6 rpm",
+    tooltip = "Summon Heavy Moon with 6 RPM. Gain 2 Heat.",
+  },
+  twin_seed = {
+    id = "twin_seed",
+    name = "twin seed",
+    cost = 3,
+    shopPrice = 35,
+    isMoonCard = true,
+    line = "summon 2x moon 3",
+    tooltip = "Summon 2 Moons with 3 RPM each. Gain 2 Heat.",
+  },
+  precision_spin = {
+    id = "precision_spin",
+    name = "precision spin",
+    cost = 1,
+    shopPrice = 35,
+    line = "spin +2",
+    tooltip = "All Moons gain +2 RPM permanently this run. Gain 2 Heat.",
+  },
+  cold_sink = {
+    id = "cold_sink",
+    name = "cold sink",
+    cost = 1,
+    shopPrice = 25,
+    line = "vent 4",
+    tooltip = "Vent 4.",
+  },
+  redline = {
+    id = "redline",
+    name = "redline",
+    cost = 1,
+    shopPrice = 40,
+    line = "overclock +4",
+    tooltip = "This turn, all Moons gain +4 RPM. Gain 2 Heat.",
+  },
+  containment = {
+    id = "containment",
+    name = "containment",
+    cost = 1,
+    shopPrice = 30,
+    line = "vent 2, next -1 heat",
+    tooltip = "Vent 2. Next card this turn gains -1 Heat.",
+  },
+  compression = {
+    id = "compression",
+    name = "compression",
+    cost = 1,
+    shopPrice = 35,
+    line = "next moon cheaper +2",
+    tooltip = "Next Moon card this turn costs 1 less and gains +2 RPM.",
+  },
+  reactor_feed = {
+    id = "reactor_feed",
+    name = "reactor feed",
+    cost = 0,
+    shopPrice = 30,
+    line = "+1 energy this turn",
+    tooltip = "Gain +1 Energy this turn. Gain 1 Heat.",
+  },
+  resonant_burst = {
+    id = "resonant_burst",
+    name = "resonant burst",
+    cost = 2,
+    shopPrice = 45,
+    line = "+2 rpm this turn/moon",
+    tooltip = "Gain +2 RPM this turn per Moon. Gain 2 Heat.",
+  },
+  anchor = {
+    id = "anchor",
+    name = "anchor",
+    cost = 2,
+    shopPrice = 40,
+    line = "summon anchor 2 rpm",
+    tooltip = "Summon Anchor with 2 RPM. End-turn Heat gain -1.",
   },
 }
-local STARTING_DECK = {
-  "moon",
-  "satellite",
-  "speedWave",
-  "planet",
-  "megaPlanet",
+local STARTER_CARD_ORDER = {"moonseed", "coolant_vent", "spin_up", "overclock"}
+local SHOP_CARD_ORDER = {
+  "heavy_moon",
+  "twin_seed",
+  "precision_spin",
+  "cold_sink",
+  "redline",
+  "containment",
+  "compression",
+  "reactor_feed",
+  "resonant_burst",
+  "anchor",
 }
+local STARTING_DECK = {}
+do
+  for i = 1, #STARTER_CARD_ORDER do
+    local id = STARTER_CARD_ORDER[i]
+    local copies = CARD_DEFS[id].starterCopies or 0
+    for _ = 1, copies do
+      STARTING_DECK[#STARTING_DECK + 1] = id
+    end
+  end
+end
 local BG_MUSIC_VOLUME = 0.72
 local BG_MUSIC_LOOP_FADE_SECONDS = 0.28
 local BG_MUSIC_DUCK_SECONDS = 0.22
@@ -304,6 +399,18 @@ local state = {
   maxTurns = MAX_TURNS,
   energy = TURN_ENERGY,
   objectiveRpm = OBJECTIVE_RPM,
+  coreRpm = CORE_BASE_RPM,
+  heat = 0,
+  heatCap = HEAT_CAP,
+  highestRpm = CORE_BASE_RPM,
+  rewardRpm = 0,
+  permanentMoonSpin = 0,
+  turnOverclockRpm = 0,
+  turnBurstRpm = 0,
+  nextCardHeatReduction = 0,
+  nextMoonCostReduction = 0,
+  nextMoonRpmBonus = 0,
+  runOutcome = "",
   runComplete = false,
   runWon = false,
   lastTurnPulsePlayed = false,
@@ -318,6 +425,7 @@ local ui = {
   mainDeckBtn = {x = 0, y = 0, w = 0, h = 0},
   menuBackBtn = {x = 0, y = 0, w = 0, h = 0},
   deckCardButtons = {},
+  deckShopButtons = {},
   cardButtons = {},
   drawPile = {x = 0, y = 0, w = 0, h = 0},
   discardPile = {x = 0, y = 0, w = 0, h = 0},
@@ -810,13 +918,66 @@ local function collectAllOrbiters()
   return pool
 end
 
-local function computeTotalRpm()
-  local totalRpm = 0
-  local stabilitySpeedMultiplier = blackHoleStabilitySpeedMultiplier()
-  for _, orbiter in ipairs(collectAllOrbiters()) do
-    totalRpm = totalRpm + orbiter.speed * (1 + orbiter.boost + speedWaveBoostFor(orbiter)) * stabilitySpeedMultiplier * RAD_PER_SECOND_TO_RPM
+local function isMoonBody(orbiter)
+  return orbiter and (orbiter.bodyKind == "moon" or orbiter.bodyKind == "heavy_moon")
+end
+
+local function countMoonBodies()
+  local count = 0
+  local orbiters = collectAllOrbiters()
+  for i = 1, #orbiters do
+    if isMoonBody(orbiters[i]) then
+      count = count + 1
+    end
   end
-  return totalRpm
+  return count
+end
+
+local function countAnchors()
+  local count = 0
+  local orbiters = collectAllOrbiters()
+  for i = 1, #orbiters do
+    if orbiters[i].bodyKind == "anchor" then
+      count = count + 1
+    end
+  end
+  return count
+end
+
+local function effectiveBodyRpm(orbiter)
+  if not orbiter then
+    return 0
+  end
+  local rpm = orbiter.baseRpm or 0
+  if isMoonBody(orbiter) then
+    rpm = rpm + state.permanentMoonSpin + state.turnOverclockRpm
+  end
+  return math.max(0, rpm)
+end
+
+local function syncOrbiterSpeedsFromBodies()
+  local orbiters = collectAllOrbiters()
+  for i = 1, #orbiters do
+    local orbiter = orbiters[i]
+    orbiter.speed = effectiveBodyRpm(orbiter) * RPM_TO_RAD_PER_SECOND
+  end
+end
+
+local function computeTotalRpm()
+  local total = state.coreRpm + state.turnBurstRpm
+  local orbiters = collectAllOrbiters()
+  for i = 1, #orbiters do
+    total = total + effectiveBodyRpm(orbiters[i])
+  end
+  return total
+end
+
+local function updateHighestRpm()
+  local current = math.floor(computeTotalRpm() + 0.5)
+  if current > state.highestRpm then
+    state.highestRpm = current
+  end
+  return current
 end
 
 local function triggerGravityPulse()
@@ -856,67 +1017,147 @@ local function discardCurrentHand()
   end
 end
 
-local function setOrbiterRpm(orbiter, rpm)
+local function resetTurnModifiers()
+  state.turnOverclockRpm = 0
+  state.turnBurstRpm = 0
+  state.nextCardHeatReduction = 0
+  state.nextMoonCostReduction = 0
+  state.nextMoonRpmBonus = 0
+end
+
+local function finishRun(outcome)
+  state.runComplete = true
+  state.runOutcome = outcome
+  state.runWon = outcome ~= "collapse" and state.highestRpm >= state.objectiveRpm
+  state.rewardRpm = state.highestRpm
+end
+
+local function ventHeat(amount)
+  if amount <= 0 then
+    return
+  end
+  state.heat = math.max(0, state.heat - amount)
+end
+
+local function addHeat(amount)
+  if amount <= 0 then
+    return
+  end
+  state.heat = state.heat + amount
+  if state.heat >= state.heatCap then
+    state.heat = state.heatCap
+    updateHighestRpm()
+    finishRun("collapse")
+  end
+end
+
+local function tagBody(orbiter, bodyKind, baseRpm)
   if not orbiter then
     return
   end
-  orbiter.speed = rpm * RPM_TO_RAD_PER_SECOND
+  orbiter.bodyKind = bodyKind
+  orbiter.baseRpm = baseRpm
 end
 
-local function addRpmToAllOrbiters(deltaRpm)
-  local delta = deltaRpm * RPM_TO_RAD_PER_SECOND
-  for _, orbiter in ipairs(collectAllOrbiters()) do
-    orbiter.speed = math.max(0, orbiter.speed + delta)
+local function summonMoon(baseRpm)
+  local before = #state.moons
+  if not addMoon(nil) then
+    return false
   end
+  tagBody(state.moons[before + 1], "moon", baseRpm)
+  return true
 end
 
-local function selectedMoonParent()
-  local selected = state.selectedOrbiter
-  if selected and (selected.kind == "planet" or selected.kind == "mega-planet") then
-    return selected
+local function summonHeavyMoon(baseRpm)
+  local before = #state.planets
+  if not addPlanet() then
+    return false
   end
-  return nil
+  tagBody(state.planets[before + 1], "heavy_moon", baseRpm)
+  return true
 end
 
-local function applyCard(cardId)
-  if cardId == "moon" then
-    local before = #state.moons
-    if not addMoon(selectedMoonParent()) then
-      return false
-    end
-    setOrbiterRpm(state.moons[before + 1], CARD_DEFS.moon.rpm)
-    return true
-  elseif cardId == "satellite" then
-    local before = #state.satellites
-    if not addSatellite() then
-      return false
-    end
-    setOrbiterRpm(state.satellites[before + 1], CARD_DEFS.satellite.rpm)
-    return true
-  elseif cardId == "planet" then
-    local before = #state.planets
-    if not addPlanet() then
-      return false
-    end
-    setOrbiterRpm(state.planets[before + 1], CARD_DEFS.planet.rpm)
-    return true
-  elseif cardId == "megaPlanet" then
-    local before = #state.megaPlanets
-    if not addMegaPlanet() then
-      return false
-    end
-    setOrbiterRpm(state.megaPlanets[before + 1], CARD_DEFS.megaPlanet.rpm)
-    return true
-  elseif cardId == "speedWave" then
-    addRpmToAllOrbiters(1)
-    return true
+local function summonAnchor(baseRpm)
+  local before = #state.satellites
+  if not addSatellite() then
+    return false
   end
-  return false
+  tagBody(state.satellites[before + 1], "anchor", baseRpm)
+  return true
+end
+
+local function applyCard(cardDef, moonBonusRpm)
+  local heatGain = 0
+  local id = cardDef.id
+  if id == "moonseed" then
+    if not summonMoon(4 + moonBonusRpm) then
+      return false
+    end
+    heatGain = 1
+  elseif id == "coolant_vent" then
+    ventHeat(2)
+  elseif id == "spin_up" then
+    state.permanentMoonSpin = state.permanentMoonSpin + 1
+    heatGain = 1
+  elseif id == "overclock" then
+    state.turnOverclockRpm = state.turnOverclockRpm + 2
+    heatGain = 1
+  elseif id == "heavy_moon" then
+    if not summonHeavyMoon(6 + moonBonusRpm) then
+      return false
+    end
+    heatGain = 2
+  elseif id == "twin_seed" then
+    if not summonMoon(3 + moonBonusRpm) then
+      return false
+    end
+    if not summonMoon(3 + moonBonusRpm) then
+      return false
+    end
+    heatGain = 2
+  elseif id == "precision_spin" then
+    state.permanentMoonSpin = state.permanentMoonSpin + 2
+    heatGain = 2
+  elseif id == "cold_sink" then
+    ventHeat(4)
+  elseif id == "redline" then
+    state.turnOverclockRpm = state.turnOverclockRpm + 4
+    heatGain = 2
+  elseif id == "containment" then
+    ventHeat(2)
+    state.nextCardHeatReduction = state.nextCardHeatReduction + 1
+  elseif id == "compression" then
+    state.nextMoonCostReduction = state.nextMoonCostReduction + 1
+    state.nextMoonRpmBonus = state.nextMoonRpmBonus + 2
+  elseif id == "reactor_feed" then
+    state.energy = state.energy + 1
+    heatGain = 1
+  elseif id == "resonant_burst" then
+    state.turnBurstRpm = state.turnBurstRpm + countMoonBodies() * 2
+    heatGain = 2
+  elseif id == "anchor" then
+    if not summonAnchor(2) then
+      return false
+    end
+  else
+    return false
+  end
+
+  local heatReduction = state.nextCardHeatReduction
+  if heatReduction > 0 then
+    heatGain = math.max(0, heatGain - heatReduction)
+    state.nextCardHeatReduction = 0
+  end
+  addHeat(heatGain)
+  syncOrbiterSpeedsFromBodies()
+  updateHighestRpm()
+  return true
 end
 
 local function beginTurn(turnNumber)
   state.turn = turnNumber
   state.energy = TURN_ENERGY
+  resetTurnModifiers()
   drawCards(STARTING_HAND_SIZE)
   if state.turn == state.maxTurns and not state.lastTurnPulsePlayed then
     triggerGravityPulse()
@@ -925,50 +1166,106 @@ local function beginTurn(turnNumber)
 end
 
 local function endPlayerTurn()
+  if state.runComplete then
+    return
+  end
+  local endTurnHeat = math.max(0, END_TURN_HEAT_GAIN - countAnchors())
+  addHeat(endTurnHeat)
+  syncOrbiterSpeedsFromBodies()
+  updateHighestRpm()
+  if state.runComplete then
+    return
+  end
   discardCurrentHand()
   if state.turn >= state.maxTurns then
-    state.runComplete = true
-    state.runWon = computeTotalRpm() >= state.objectiveRpm
+    finishRun("completed")
     return
   end
   beginTurn(state.turn + 1)
+end
+
+local function currentCardCost(cardDef)
+  if not cardDef then
+    return 0
+  end
+  local cost = cardDef.cost or 0
+  if cardDef.isMoonCard and state.nextMoonCostReduction > 0 then
+    cost = math.max(0, cost - state.nextMoonCostReduction)
+  end
+  return cost
 end
 
 local function playCard(handIndex)
   if state.runComplete then
     return false
   end
-  local beforeRpm = computeTotalRpm()
   local cardId = state.hand[handIndex]
   if not cardId then
     return false
   end
   local cardDef = CARD_DEFS[cardId]
-  if not cardDef or state.energy < cardDef.cost then
+  if not cardDef then
     return false
   end
-  if not applyCard(cardId) then
+  local beforeRpm = math.floor(computeTotalRpm() + 0.5)
+  local moonCostReduction = state.nextMoonCostReduction
+  local moonRpmBonus = 0
+  if cardDef.isMoonCard and moonCostReduction > 0 then
+    moonRpmBonus = state.nextMoonRpmBonus
+  end
+  local effectiveCost = currentCardCost(cardDef)
+  if state.energy < effectiveCost then
     return false
   end
-  state.energy = state.energy - cardDef.cost
+  state.energy = state.energy - effectiveCost
+  if cardDef.isMoonCard and moonCostReduction > 0 then
+    state.nextMoonCostReduction = 0
+    state.nextMoonRpmBonus = 0
+  end
+  if not applyCard(cardDef, moonRpmBonus) then
+    state.energy = state.energy + effectiveCost
+    return false
+  end
   table.remove(state.hand, handIndex)
   state.discardPile[#state.discardPile + 1] = cardId
-  local afterRpm = computeTotalRpm()
-  state.rpmRollFrom = math.floor(beforeRpm + 0.5)
-  state.rpmRollTo = math.floor(afterRpm + 0.5)
+  local afterRpm = math.floor(computeTotalRpm() + 0.5)
+  state.rpmRollFrom = beforeRpm
+  state.rpmRollTo = afterRpm
   state.rpmRollTimer = state.rpmRollDuration
   playMenuBuyClickFx()
   return true
 end
 
 local function startCardRun()
+  state.megaPlanets = {}
+  state.planets = {}
+  state.moons = {}
+  state.satellites = {}
+  state.renderOrbiters = {}
+  state.nextRenderOrder = 0
+  state.selectedOrbiter = nil
+  state.selectedLightSource = false
   state.hand = {}
   state.drawPile = {}
   state.discardPile = {}
+  state.cardHoverLift = {}
+  state.speedWaveRipples = {}
   for i = 1, #STARTING_DECK do
     state.drawPile[#state.drawPile + 1] = STARTING_DECK[i]
   end
   shuffleInPlace(state.drawPile)
+  state.coreRpm = CORE_BASE_RPM
+  state.heat = 0
+  state.heatCap = HEAT_CAP
+  state.permanentMoonSpin = 0
+  state.turnOverclockRpm = 0
+  state.turnBurstRpm = 0
+  state.nextCardHeatReduction = 0
+  state.nextMoonCostReduction = 0
+  state.nextMoonRpmBonus = 0
+  state.highestRpm = CORE_BASE_RPM
+  state.rewardRpm = 0
+  state.runOutcome = ""
   state.turn = 1
   state.energy = TURN_ENERGY
   state.runComplete = false
@@ -977,6 +1274,8 @@ local function startCardRun()
   state.rpmRollFrom = 0
   state.rpmRollTo = 0
   state.rpmRollTimer = 0
+  syncOrbiterSpeedsFromBodies()
+  updateHighestRpm()
   beginTurn(1)
 end
 
@@ -1039,7 +1338,7 @@ local function initGameSystems()
   })
 end
 
-local function drawBackground()
+function drawBackground()
   love.graphics.clear(palette.space)
 
   for _, s in ipairs(state.stars) do
@@ -1051,7 +1350,7 @@ local function drawBackground()
   end
 end
 
-local function drawSelectedOrbit(frontPass)
+function drawSelectedOrbit(frontPass)
   local orbiter = state.selectedOrbiter
   if not orbiter then
     return
@@ -1085,7 +1384,7 @@ local function drawSelectedOrbit(frontPass)
   drawOrbitPath(orbiter, originX, originY, originZ + (orbiter.zBase or 0))
 end
 
-local function drawSelectedLightOrbit(frontPass)
+function drawSelectedLightOrbit(frontPass)
   if not state.selectedLightSource then
     return
   end
@@ -1112,7 +1411,7 @@ local function drawSelectedLightOrbit(frontPass)
   end
 end
 
-local function drawLitSphere(x, y, z, radius, r, g, b, lightScale, segments)
+function drawLitSphere(x, y, z, radius, r, g, b, lightScale, segments)
   local px, py, projectScale = projectWorldPoint(x, y, z or 0)
   local pr = math.max(0.6, radius * projectScale)
   local sideCount = segments or 24
@@ -1180,7 +1479,7 @@ local function drawLitSphere(x, y, z, radius, r, g, b, lightScale, segments)
   love.graphics.circle("fill", px, py, pr, sideCount)
 end
 
-local function drawPlanet()
+function drawPlanet()
   local t = 1 - clamp(state.planetBounceTime / PLANET_BOUNCE_DURATION, 0, 1)
   local kick = math.sin(t * math.pi)
   local bounceScale = 1 + kick * 0.14 * (1 - t)
@@ -1192,7 +1491,7 @@ local function drawPlanet()
   state.planetVisualRadius = pr * zoom
 end
 
-local function drawLightSource(frontPass)
+function drawLightSource(frontPass)
   local lightX, lightY, lightZ, projectedZ, px, py, projectScale = lightSourceProjected()
   if frontPass then
     if projectedZ <= 0 then
@@ -1226,7 +1525,7 @@ local function drawLightSource(frontPass)
   end
 end
 
-local function activeSpeedWaveRippleParams()
+function activeSpeedWaveRippleParams()
   local ripples = state.speedWaveRipples
   local ripple = ripples[#ripples]
   if not ripple then
@@ -1251,7 +1550,7 @@ local function activeSpeedWaveRippleParams()
     SPEED_WAVE_RIPPLE_SWIRL_STRENGTH * strength
 end
 
-local function drawOrbitalTrail(orbiter, trailLen, headAlpha, tailAlpha, originX, originY, originZ, lightScale)
+function drawOrbitalTrail(orbiter, trailLen, headAlpha, tailAlpha, originX, originY, originZ, lightScale)
   local radius = math.max(orbiter.radius, 1)
   local arcAngle = trailLen / radius
   local stepCount = math.max(4, math.ceil(arcAngle / 0.06))
@@ -1286,7 +1585,7 @@ local function drawOrbitalTrail(orbiter, trailLen, headAlpha, tailAlpha, originX
   end
 end
 
-local function hasActiveBoost(orbiter)
+function hasActiveBoost(orbiter)
   if not orbiter then
     return false
   end
@@ -1296,7 +1595,7 @@ local function hasActiveBoost(orbiter)
   return speedWaveBoostFor(orbiter) > 0
 end
 
-local function drawMoon(moon)
+function drawMoon(moon)
   local function drawChildOrbitPath(child, frontPass)
     local pr, pg, pb = computeOrbiterColor(child.angle)
     local cp = math.cos(child.plane)
@@ -1347,7 +1646,7 @@ local function drawMoon(moon)
   end
 end
 
-local function drawMoonChildSatellite(child)
+function drawMoonChildSatellite(child)
   local parentMoon = child.parentOrbiter or child.parentMoon
   if hasActiveBoost(child) then
     local baseTrailLen = math.min(child.radius * 2.2, 16 + child.boost * 22)
@@ -1360,7 +1659,7 @@ local function drawMoonChildSatellite(child)
   drawLitSphere(child.x, child.y, child.z, BODY_VISUAL.moonChildSatelliteRadius, childR, childG, childB, child.light, 12)
 end
 
-local function drawOrbitPlanet(planet)
+function drawOrbitPlanet(planet)
   if hasActiveBoost(planet) then
     local baseTrailLen = math.min(planet.radius * 2.2, 28 + planet.boost * 36)
     drawOrbitalTrail(planet, baseTrailLen, 0.5, 0.04, nil, nil, 0, planet.light)
@@ -1369,7 +1668,7 @@ local function drawOrbitPlanet(planet)
   drawLitSphere(planet.x, planet.y, planet.z, BODY_VISUAL.orbitPlanetRadius, pr, pg, pb, planet.light, 24)
 end
 
-local function drawMegaPlanet(megaPlanet)
+function drawMegaPlanet(megaPlanet)
   if hasActiveBoost(megaPlanet) then
     local baseTrailLen = math.min(megaPlanet.radius * 2.2, 36 + megaPlanet.boost * 44)
     drawOrbitalTrail(megaPlanet, baseTrailLen, 0.56, 0.05, nil, nil, 0, megaPlanet.light)
@@ -1378,7 +1677,7 @@ local function drawMegaPlanet(megaPlanet)
   drawLitSphere(megaPlanet.x, megaPlanet.y, megaPlanet.z, BODY_VISUAL.megaPlanetRadius, pr, pg, pb, megaPlanet.light, 36)
 end
 
-local function drawSatellite(satellite)
+function drawSatellite(satellite)
   if hasActiveBoost(satellite) then
     local baseTrailLen = math.min(satellite.radius * 2.2, 16 + satellite.boost * 22)
     drawOrbitalTrail(satellite, baseTrailLen, 0.44, 0.02, nil, nil, 0, satellite.light)
@@ -1387,7 +1686,7 @@ local function drawSatellite(satellite)
   drawLitSphere(satellite.x, satellite.y, satellite.z, BODY_VISUAL.satelliteRadius, satR, satG, satB, satellite.light, 18)
 end
 
-local function orbiterHitRadius(orbiter)
+function orbiterHitRadius(orbiter)
   local baseRadius
   local margin
   if orbiter.kind == "moon" then
@@ -1412,7 +1711,7 @@ local function orbiterHitRadius(orbiter)
   return (baseRadius + margin) * projectScale
 end
 
-local function depthSortOrbiters(a, b)
+function depthSortOrbiters(a, b)
   local az = orbiterRenderDepth(a)
   local bz = orbiterRenderDepth(b)
   if az ~= bz then
@@ -1421,7 +1720,7 @@ local function depthSortOrbiters(a, b)
   return (a.renderOrder or 0) < (b.renderOrder or 0)
 end
 
-local function collectRenderOrbiters()
+function collectRenderOrbiters()
   local renderOrbiters = state.renderOrbiters
   for i = #renderOrbiters, 1, -1 do
     renderOrbiters[i] = nil
@@ -1557,6 +1856,17 @@ local function drawHud()
   local objectiveY = viewportY + math.floor(10 * uiScale)
   setColorScaled(palette.text, 1, 0.92)
   drawText(objectiveText, objectiveX, objectiveY)
+  local highText = string.format("highest rpm %d", state.highestRpm)
+  setColorScaled(palette.text, 1, 0.85)
+  drawText(highText, viewportX + viewportW - font:getWidth(highText) - math.floor(10 * uiScale), objectiveY + lineH + math.floor(2 * uiScale))
+  if state.runComplete then
+    local outcomeText = state.runOutcome == "collapse" and "collapse" or (state.runWon and "goal reached" or "goal missed")
+    local rewardText = string.format("reward %d", state.rewardRpm)
+    setColorScaled(state.runOutcome == "collapse" and swatch.bright or swatch.brightest, 1, 0.95)
+    drawText(outcomeText, viewportX + viewportW - font:getWidth(outcomeText) - math.floor(10 * uiScale), objectiveY + lineH * 2 + math.floor(4 * uiScale))
+    setColorScaled(swatch.brightest, 1, 0.95)
+    drawText(rewardText, viewportX + viewportW - font:getWidth(rewardText) - math.floor(10 * uiScale), objectiveY + lineH * 3 + math.floor(6 * uiScale))
+  end
 
   local endBtn = ui.endTurnBtn
   endBtn.w = math.floor(END_TURN_W * uiScale)
@@ -1581,16 +1891,18 @@ local function drawHud()
   local handW = handCount > 0 and (handCount * cardW + (handCount - 1) * cardGap) or 0
   local cardY = viewportY + viewportH - cardH - math.floor(12 * uiScale)
   local startX = viewportX + math.floor((viewportW - handW) * 0.5)
-  local fixedSlots = 4
+  local fixedSlots = STARTING_HAND_SIZE
   local fixedHandW = fixedSlots * cardW + (fixedSlots - 1) * cardGap
   local fixedStartX = viewportX + math.floor((viewportW - fixedHandW) * 0.5)
 
   local turnText = string.format("turn %d/%d", state.turn, state.maxTurns)
   local energyText = string.format("energy %d", state.energy)
-  local infoY = cardY - lineH * 2 - math.floor(10 * uiScale)
+  local heatText = string.format("heat %d/%d", state.heat, state.heatCap)
+  local infoY = cardY - lineH * 3 - math.floor(12 * uiScale)
   setColorScaled(palette.text, 1, 0.92)
   drawText(turnText, viewportX + viewportW * 0.5 - font:getWidth(turnText) * 0.5, infoY)
   drawText(energyText, viewportX + viewportW * 0.5 - font:getWidth(energyText) * 0.5, infoY + lineH + math.floor(2 * uiScale))
+  drawText(heatText, viewportX + viewportW * 0.5 - font:getWidth(heatText) * 0.5, infoY + lineH * 2 + math.floor(4 * uiScale))
 
   local pileW = math.floor(94 * uiScale)
   local pileH = math.floor(56 * uiScale)
@@ -1639,14 +1951,15 @@ local function drawHud()
     state.cardHoverLift[i] = hoverLift
     btn.y = cardY - hoverLift
     hovered = pointInRect(mouseX, mouseY, btn)
-    local playable = (not state.runComplete) and cardDef and (state.energy >= cardDef.cost)
+    local cardCost = currentCardCost(cardDef)
+    local playable = (not state.runComplete) and cardDef and (state.energy >= cardCost)
     local alpha = playable and 1 or 0.45
     setColorScaled(swatch.darkest, 1, 0.92 * alpha)
     love.graphics.rectangle("fill", btn.x, btn.y, btn.w, btn.h)
     setColorScaled(swatch.brightest, 1, (hovered and 1 or 0.75) * alpha)
     love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h)
     setColorScaled(palette.text, 1, alpha)
-    local costText = cardDef and (tostring(cardDef.cost) .. " energy") or "? energy"
+    local costText = cardDef and ("cost " .. tostring(cardCost)) or "cost ?"
     drawText(costText, btn.x + math.floor(8 * uiScale), btn.y + math.floor(6 * uiScale))
     drawText(cardDef and cardDef.name or cardId, btn.x + math.floor(8 * uiScale), btn.y + lineH + math.floor(12 * uiScale))
     drawText(cardDef and cardDef.line or "", btn.x + math.floor(8 * uiScale), btn.y + lineH * 2 + math.floor(18 * uiScale))
@@ -1654,13 +1967,8 @@ local function drawHud()
       hoveredTooltipBtn = btn
       hoveredTooltipLines = {
         {pre = cardDef.tooltip or "", hi = "", post = ""},
-        {pre = "cost ", hi = tostring(cardDef.cost), post = " energy"},
+        {pre = "cost ", hi = tostring(cardCost), post = " energy"},
       }
-      if cardDef.rpm then
-        hoveredTooltipLines[#hoveredTooltipLines + 1] = {pre = "sets speed to ", hi = tostring(cardDef.rpm) .. " rpm", post = ""}
-      else
-        hoveredTooltipLines[#hoveredTooltipLines + 1] = {pre = "effect ", hi = "+1 rpm", post = " to all orbiters"}
-      end
     end
   end
   drawHoverTooltip(hoveredTooltipLines, hoveredTooltipBtn, uiScale, lineH, true)
@@ -1769,12 +2077,13 @@ function drawDeckMenu()
       local cardW = colW - math.floor(20 * uiScale)
       local cardH = lineH * 3 + math.floor(16 * uiScale)
       local cardGap = math.floor(8 * uiScale)
-      for n = #ui.deckCardButtons, #STARTING_DECK + 1, -1 do
+      for n = #ui.deckCardButtons, #STARTER_CARD_ORDER + 1, -1 do
         ui.deckCardButtons[n] = nil
       end
-      for n = 1, #STARTING_DECK do
-        local cardId = STARTING_DECK[n]
+      for n = 1, #STARTER_CARD_ORDER do
+        local cardId = STARTER_CARD_ORDER[n]
         local cardDef = CARD_DEFS[cardId]
+        local copies = cardDef.starterCopies or 0
         local btn = ui.deckCardButtons[n] or {}
         ui.deckCardButtons[n] = btn
         btn.x = listX
@@ -1787,7 +2096,7 @@ function drawDeckMenu()
         setColorScaled(swatch.brightest, 1, hovered and 1 or 0.7)
         love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h)
         setColorScaled(palette.text, 1, 0.95)
-        drawText(tostring(cardDef.cost) .. " energy", btn.x + math.floor(8 * uiScale), btn.y + math.floor(4 * uiScale))
+        drawText("x" .. tostring(copies) .. "  cost " .. tostring(cardDef.cost), btn.x + math.floor(8 * uiScale), btn.y + math.floor(4 * uiScale))
         drawText(cardDef.name, btn.x + math.floor(8 * uiScale), btn.y + lineH + math.floor(8 * uiScale))
         drawText(cardDef.line, btn.x + math.floor(8 * uiScale), btn.y + lineH * 2 + math.floor(12 * uiScale))
         if hovered then
@@ -1795,7 +2104,43 @@ function drawDeckMenu()
           hoveredTooltipLines = {
             {pre = cardDef.tooltip, hi = "", post = ""},
             {pre = "cost ", hi = tostring(cardDef.cost), post = " energy"},
-            cardDef.rpm and {pre = "sets speed to ", hi = tostring(cardDef.rpm) .. " rpm", post = ""} or {pre = "effect ", hi = "+1 rpm", post = " to all orbiters"},
+            {pre = "starter copies ", hi = tostring(copies), post = ""},
+          }
+        end
+      end
+    elseif headers[i] == "shop" then
+      local rowX = colX + math.floor(10 * uiScale)
+      local rowY = colY + lineH + math.floor(12 * uiScale)
+      local rowW = colW - math.floor(20 * uiScale)
+      local rowH = lineH + math.floor(8 * uiScale)
+      local rowGap = math.floor(4 * uiScale)
+      for n = #ui.deckShopButtons, #SHOP_CARD_ORDER + 1, -1 do
+        ui.deckShopButtons[n] = nil
+      end
+      for n = 1, #SHOP_CARD_ORDER do
+        local cardId = SHOP_CARD_ORDER[n]
+        local cardDef = CARD_DEFS[cardId]
+        local btn = ui.deckShopButtons[n] or {}
+        ui.deckShopButtons[n] = btn
+        btn.x = rowX
+        btn.y = rowY + (n - 1) * (rowH + rowGap)
+        btn.w = rowW
+        btn.h = rowH
+        local hovered = pointInRect(mouseX, mouseY, btn)
+        setColorScaled(swatch.darkest, 1, hovered and 0.98 or 0.9)
+        love.graphics.rectangle("fill", btn.x, btn.y, btn.w, btn.h)
+        setColorScaled(swatch.brightest, 1, hovered and 1 or 0.7)
+        love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h)
+        setColorScaled(palette.text, 1, 0.95)
+        drawText(cardDef.name, btn.x + math.floor(8 * uiScale), btn.y + math.floor(4 * uiScale))
+        local priceText = tostring(cardDef.shopPrice or 0)
+        drawText(priceText, btn.x + btn.w - font:getWidth(priceText) - math.floor(8 * uiScale), btn.y + math.floor(4 * uiScale))
+        if hovered then
+          hoveredTooltipBtn = btn
+          hoveredTooltipLines = {
+            {pre = cardDef.tooltip, hi = "", post = ""},
+            {pre = "cost ", hi = tostring(cardDef.cost), post = " energy"},
+            {pre = "shop ", hi = tostring(cardDef.shopPrice or 0), post = ""},
           }
         end
       end
