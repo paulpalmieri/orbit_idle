@@ -1,7 +1,5 @@
 local Systems = {
   Modifier = require("game.systems.modifiers"),
-  Progression = require("game.systems.progression"),
-  Economy = require("game.systems.economy"),
   Orbiters = require("game.systems.orbiters"),
   MoonTiming = require("game.systems.moon_timing"),
 }
@@ -154,7 +152,6 @@ function createState(opts)
     activeObjectives.reach_60_rpm = true
   end
   return {
-    orbits = 0,
     moons = {},
     renderOrbiters = {},
     stars = opts.stars or {},
@@ -1762,22 +1759,8 @@ end
 initGameSystems = function()
   runtime.modifiers = Systems.Modifier.new()
 
-  runtime.economy = Systems.Economy.new({
-    state = state,
-    modifiers = runtime.modifiers,
-    costs = {
-      moon = ECONOMY.moonCost,
-    },
-  })
-
-  runtime.progression = Systems.Progression.new({
-    state = state,
-    modifiers = runtime.modifiers,
-  })
-
   runtime.orbiters = Systems.Orbiters.new({
     state = state,
-    economy = runtime.economy,
     modifiers = runtime.modifiers,
     orbitConfigs = ORBIT_CONFIGS,
     bodyVisual = BODY_VISUAL,
@@ -1792,13 +1775,8 @@ initGameSystems = function()
     onOrbitGainFx = state.singleMoonMode and nil or spawnOrbitGainFx,
     onOrbitsEarned = function(count)
       state.orbitsEarnedThisRun = (state.orbitsEarnedThisRun or 0) + count
-      if runtime.progression then
-        runtime.progression:onOrbitsEarned(count)
-      end
     end,
   })
-
-  runtime.progression:update()
   ensureVariantObjectiveForSelection()
 
   if state.singleMoonMode then
@@ -3691,9 +3669,7 @@ function love.update(dt)
     if runtime.orbiters then
       runtime.orbiters:update(dt)
     end
-    if runtime.progression then
-      runtime.progression:update()
-    end
+
     state.temporaryRpm, state.currentRpm = computeRpmBreakdown()
     state.maxRpmReached = math.max(state.maxRpmReached or 0, state.currentRpm or 0)
     if instabilityRatio() >= PROGRESSION.criticalInstabilityRatio then

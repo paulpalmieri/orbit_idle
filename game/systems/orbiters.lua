@@ -29,7 +29,6 @@ function OrbiterSystem.new(opts)
   opts = opts or {}
   local self = {
     state = assert(opts.state, "OrbiterSystem requires state"),
-    economy = assert(opts.economy, "OrbiterSystem requires economy"),
     modifiers = assert(opts.modifiers, "OrbiterSystem requires modifiers"),
     orbitConfigs = assert(opts.orbitConfigs, "OrbiterSystem requires orbitConfigs"),
     bodyVisual = assert(opts.bodyVisual, "OrbiterSystem requires bodyVisual"),
@@ -76,7 +75,6 @@ function OrbiterSystem:_notifyOrbitGain(orbiter, turnsGained, fxRadius)
 
   local reward = self:getOrbitGainReward(turnsGained)
   if reward > 0 then
-    self.state.orbits = self.state.orbits + reward
     if self.onOrbitsEarned then
       self.onOrbitsEarned(reward)
     end
@@ -123,12 +121,7 @@ function OrbiterSystem:addMoon(parentOrbiter)
     return false
   end
 
-  if #self.state.moons > 0 then
-    local bought = self.economy:trySpendCost("moon")
-    if not bought then
-      return false
-    end
-  end
+
 
   local moon = self:_addOrbiter(self.state.moons, self.orbitConfigs.moon, "moon")
   moon.parentOrbiter = parentOrbiter
