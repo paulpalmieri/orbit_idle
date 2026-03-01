@@ -1,15 +1,13 @@
 local Systems = {
   Modifier = require("game.systems.modifiers"),
-  Progression = require("game.systems.progression"),
-  Economy = require("game.systems.economy"),
   Orbiters = require("game.systems.orbiters"),
-  Upgrades = require("game.systems.upgrades"),
 }
 
 local GAME_W = 1280
 local GAME_H = 720
 local TWO_PI = math.pi * 2
 local RAD_PER_SECOND_TO_RPM = 60 / TWO_PI
+local RPM_TO_RAD_PER_SECOND = TWO_PI / 60
 local CAMERA_LIGHT_HEIGHT = 280
 local CAMERA_LIGHT_Z_SCALE = 220
 local CAMERA_LIGHT_AMBIENT = 0.10
@@ -102,50 +100,80 @@ local PLANET_IMPULSE_DURATION = 10
 local PLANET_IMPULSE_RISE_RATE = 4.5
 local PLANET_IMPULSE_FALL_RATE = 6.5
 local PLANET_BOUNCE_DURATION = 0.12
-local GRAVITY_WELL_INNER_SCALE = 0.01
-local GRAVITY_WELL_RADIUS_SCALE = 1.3
-local GRAVITY_WELL_RADIAL_STRENGTH = 0.03
-local GRAVITY_WELL_SWIRL_STRENGTH = 0.0010
-local SPEED_WAVE_COST = 25
-local SPEED_CLICK_COST = 15
-local BLACK_HOLE_SHADER_COST = 100
-local SPEED_WAVE_CLICK_THRESHOLD = 10
-local SPEED_WAVE_MULTIPLIER = 1.5
-local SPEED_WAVE_DURATION = 5
+local GRAVITY_WELL_INNER_SCALE = 0.06
+local GRAVITY_WELL_RADIUS_SCALE = 1.18
+local GRAVITY_WELL_RADIAL_STRENGTH = 0.014
+local GRAVITY_WELL_SWIRL_STRENGTH = 0.00045
 local SPEED_WAVE_RIPPLE_LIFETIME = 1.1
 local SPEED_WAVE_RIPPLE_WIDTH_START = 0.020
 local SPEED_WAVE_RIPPLE_WIDTH_END = 0.092
 local SPEED_WAVE_RIPPLE_RADIAL_STRENGTH = 0.062
 local SPEED_WAVE_RIPPLE_SWIRL_STRENGTH = 0.0018
 local SPEED_WAVE_RIPPLE_END_PADDING = 0.12
-local SPEED_WAVE_TEXT_LIFETIME = 0.6
-STABILITY = {
-  idleSeconds = 4.5,
-  drainPerSecond = 0.055,
-  clickGain = 1 / 24,
-  unstableThreshold = 0.34,
-  recoveryThreshold = 0.90,
-  recoveryBoostDuration = 6,
-  recoveryBoostMultiplier = 1.22,
-  minSpeedMultiplier = 0.62,
-  waveInterval = 1.15,
-  gaugeWidth = 320,
-  segmentCount = 24,
-  maxFxDuration = 0.55,
-}
-local ORBIT_POP_LIFETIME = 1.44
 local PLANET_COLOR_CYCLE_SECONDS = 30
 local ORBIT_ICON_CYCLE_SECONDS = 1.8
 local ORBIT_ICON_FLATTEN = 0.84
 local ORBIT_ICON_SIZE = 6
 local UI_FONT_SIZE = 24
-local MOON_COST = 50
-local PLANET_COST = 1000
-local MEGA_PLANET_COST = 5000
-local SATELLITE_COST = 5
-local MOON_SATELLITE_COST = 10
 local MAX_MOONS = 5
 local MAX_SATELLITES = 20
+local STARTING_HAND_SIZE = 3
+local TURN_ENERGY = 3
+local MAX_TURNS = 4
+local OBJECTIVE_RPM = 50
+local CARD_W = 176
+local CARD_H = 104
+local CARD_GAP = 10
+local END_TURN_W = 118
+local END_TURN_H = 34
+local CARD_DEFS = {
+  moon = {
+    id = "moon",
+    name = "moon",
+    cost = 1,
+    rpm = 10,
+    line = "add moon @10",
+    tooltip = "Adds a moon orbiting at 10 rpm.",
+  },
+  satellite = {
+    id = "satellite",
+    name = "satellite",
+    cost = 2,
+    rpm = 20,
+    line = "add sat @20",
+    tooltip = "Adds a satellite orbiting at 20 rpm.",
+  },
+  speedWave = {
+    id = "speedWave",
+    name = "speed wave",
+    cost = 1,
+    line = "+1 rpm all",
+    tooltip = "Adds +1 rpm to all orbiting entities.",
+  },
+  planet = {
+    id = "planet",
+    name = "planet",
+    cost = 1,
+    rpm = 10,
+    line = "add planet @10",
+    tooltip = "Adds a planet orbiting at 10 rpm.",
+  },
+  megaPlanet = {
+    id = "megaPlanet",
+    name = "mega planet",
+    cost = 1,
+    rpm = 5,
+    line = "add mega @5",
+    tooltip = "Adds a mega planet orbiting at 5 rpm.",
+  },
+}
+local STARTING_DECK = {
+  "moon",
+  "satellite",
+  "speedWave",
+  "planet",
+  "megaPlanet",
+}
 local BG_MUSIC_VOLUME = 0.72
 local BG_MUSIC_LOOP_FADE_SECONDS = 0.28
 local BG_MUSIC_DUCK_SECONDS = 0.22
@@ -181,8 +209,8 @@ local canvas
 local uiFont
 local uiScreenFont
 local uiScreenFontSize = 0
-local orbitCounterFont
-local orbitCounterFontSize = 0
+local rpmDisplayFont
+local rpmDisplayFontSize = 0
 local bgMusic
 local bgMusicFirstPass = false
 local bgMusicPrevPos = 0
@@ -252,7 +280,7 @@ local orbitColorCycle = {
 }
 
 local state = {
-  orbits = 10000,
+  screen = "main_menu",
   megaPlanets = {},
   planets = {},
   moons = {},
@@ -265,36 +293,39 @@ local state = {
   selectedLightSource = false,
   sphereDitherEnabled = true,
   borderlessFullscreen = false,
-  orbitPopTexts = {},
   planetBounceTime = 0,
-  speedWaveUnlocked = false,
-  speedClickUnlocked = false,
-  blackHoleShaderUnlocked = false,
-  planetClickCount = 0,
-  speedWaveTimer = 0,
   speedWaveRipples = {},
-  speedWaveText = nil,
-  stability = 1,
-  stabilityIdleTimer = 0,
-  stabilityBoostTimer = 0,
-  stabilityWaveTimer = 0,
-  stabilityMaxFxTimer = 0,
   planetVisualRadius = BODY_VISUAL.planetRadius,
+  hand = {},
+  drawPile = {},
+  discardPile = {},
+  cardHoverLift = {},
+  turn = 1,
+  maxTurns = MAX_TURNS,
+  energy = TURN_ENERGY,
+  objectiveRpm = OBJECTIVE_RPM,
+  runComplete = false,
+  runWon = false,
+  lastTurnPulsePlayed = false,
+  rpmRollTimer = 0,
+  rpmRollDuration = 0.30,
+  rpmRollFrom = 0,
+  rpmRollTo = 0,
 }
 
 local ui = {
-  buyMegaPlanetBtn = {x = 0, y = 0, w = 0, h = 0},
-  buyPlanetBtn = {x = 0, y = 0, w = 0, h = 0},
-  buyMoonBtn = {x = 0, y = 0, w = 0, h = 0},
-  buySatelliteBtn = {x = 0, y = 0, w = 0, h = 0},
-  speedWaveBtn = {x = 0, y = 0, w = 0, h = 0},
-  speedClickBtn = {x = 0, y = 0, w = 0, h = 0},
-  blackHoleShaderBtn = {x = 0, y = 0, w = 0, h = 0},
-  stabilityGauge = {x = 0, y = 0, w = 0, h = 0},
-  orbiterActionBtn = {x = 0, y = 0, w = 0, h = 0, visible = false, enabled = false, action = nil},
+  mainPlayBtn = {x = 0, y = 0, w = 0, h = 0},
+  mainDeckBtn = {x = 0, y = 0, w = 0, h = 0},
+  menuBackBtn = {x = 0, y = 0, w = 0, h = 0},
+  deckCardButtons = {},
+  cardButtons = {},
+  drawPile = {x = 0, y = 0, w = 0, h = 0},
+  discardPile = {x = 0, y = 0, w = 0, h = 0},
+  endTurnBtn = {x = 0, y = 0, w = 0, h = 0},
 }
 
 local runtime = {}
+local playMenuBuyClickFx
 
 local function activeSphereShadeStyle()
   if state.sphereDitherEnabled then
@@ -585,110 +616,11 @@ local function drawOrbitIcon(x, y, size, alphaScale)
   love.graphics.circle("fill", bx, by, bodyR, 12)
 end
 
-local function spawnOrbitGainFx(x, y, count, bodyRadius)
-  count = math.max(1, count or 1)
-  local verticalOffset = (bodyRadius or 0) + 8
-  for i = 1, count do
-    local n = #state.orbitPopTexts + 1
-    local spread = (i - (count + 1) * 0.5)
-    state.orbitPopTexts[n] = {
-      x = x + spread * 3.5,
-      y = y - verticalOffset,
-      vx = spread * 10,
-      vy = -17 - love.math.random() * 6,
-      age = 0,
-      life = ORBIT_POP_LIFETIME,
-      text = "+1",
-    }
+local function shuffleInPlace(list)
+  for i = #list, 2, -1 do
+    local j = love.math.random(1, i)
+    list[i], list[j] = list[j], list[i]
   end
-end
-
-local function updateOrbitGainFx(dt)
-  local texts = state.orbitPopTexts
-  for i = #texts, 1, -1 do
-    local pop = texts[i]
-    pop.age = pop.age + dt
-    local t = pop.age / pop.life
-    if t >= 1 then
-      table.remove(texts, i)
-    else
-      pop.x = pop.x + pop.vx * dt
-      pop.y = pop.y + pop.vy * dt
-      pop.vy = pop.vy - 7 * dt
-      pop.vx = pop.vx * (1 - math.min(1, dt * 2.4))
-    end
-  end
-end
-
-local function drawOrbitGainFx()
-  for _, pop in ipairs(state.orbitPopTexts) do
-    local t = clamp(pop.age / pop.life, 0, 1)
-    local fade = 1 - smoothstep(t)
-    local drawX = (pop.x - cx) * zoom + cx
-    local drawY = (pop.y - cy) * zoom + cy
-    local popLight = cameraLightAt(pop.x, pop.y, 0)
-    setLitColorDirect(swatch.brightest[1], swatch.brightest[2], swatch.brightest[3], popLight, fade)
-    drawText(pop.text, drawX, drawY)
-  end
-end
-
-local function moonCost()
-  if #state.moons == 0 then
-    return 0
-  end
-  if runtime.economy then
-    return runtime.economy:getCost("moon")
-  end
-  return MOON_COST
-end
-
-local function planetCost()
-  if runtime.economy then
-    return runtime.economy:getCost("planet")
-  end
-  return PLANET_COST
-end
-
-local function megaPlanetCost()
-  if runtime.economy then
-    return runtime.economy:getCost("megaPlanet")
-  end
-  return MEGA_PLANET_COST
-end
-
-local function satelliteCost()
-  if runtime.economy then
-    return runtime.economy:getCost("satellite")
-  end
-  return SATELLITE_COST
-end
-
-local function moonSatelliteCost()
-  if runtime.economy then
-    return runtime.economy:getCost("moonSatellite")
-  end
-  return MOON_SATELLITE_COST
-end
-
-local function speedWaveCost()
-  if runtime.upgrades then
-    return runtime.upgrades:speedWaveCost()
-  end
-  return SPEED_WAVE_COST
-end
-
-local function speedClickCost()
-  if runtime.upgrades then
-    return runtime.upgrades:speedClickCost()
-  end
-  return SPEED_CLICK_COST
-end
-
-local function blackHoleShaderCost()
-  if runtime.upgrades then
-    return runtime.upgrades:blackHoleShaderCost()
-  end
-  return BLACK_HOLE_SHADER_COST
 end
 
 local function createOrbitalParams(config, index)
@@ -785,15 +717,15 @@ local function getUiScreenFont()
   return uiScreenFont
 end
 
-local function getOrbitCounterFont()
+function getRpmDisplayFont()
   local uiScale = scale >= 1 and scale or 1
-  local size = math.max(1, math.floor(UI_FONT_SIZE * uiScale * 1.65 + 0.5))
-  if not orbitCounterFont or orbitCounterFontSize ~= size then
-    orbitCounterFont = love.graphics.newFont("font_gothic.ttf", size, "mono")
-    orbitCounterFont:setFilter("nearest", "nearest")
-    orbitCounterFontSize = size
+  local size = math.max(1, math.floor(UI_FONT_SIZE * uiScale * 3.1 + 0.5))
+  if not rpmDisplayFont or rpmDisplayFontSize ~= size then
+    rpmDisplayFont = love.graphics.newFont("font_gothic.ttf", size, "mono")
+    rpmDisplayFont:setFilter("nearest", "nearest")
+    rpmDisplayFontSize = size
   end
-  return orbitCounterFont
+  return rpmDisplayFont
 end
 
 local updateOrbiterPosition
@@ -826,13 +758,6 @@ local function addSatellite()
   return runtime.orbiters:addSatellite()
 end
 
-local function addSatelliteToMoon(moon)
-  if not runtime.orbiters then
-    return false
-  end
-  return runtime.orbiters:addSatelliteToMoon(moon)
-end
-
 function orbiterOrbitOrigin(orbiter)
   local parent = orbiter and orbiter.parentOrbiter
   if parent then
@@ -856,161 +781,241 @@ updateOrbiterPosition = function(orbiter)
   updateOrbiterLight(orbiter)
 end
 
-local function triggerPlanetImpulse()
-  if not runtime.orbiters then
-    return false
-  end
-  return runtime.orbiters:triggerPlanetImpulse()
-end
-
-local function speedWaveBoostFor(orbiter)
-  if not runtime.upgrades then
-    return 0
-  end
-  return runtime.upgrades:getSpeedWaveBoost(orbiter)
-end
-
-function stabilitySlowMultiplier()
-  if not runtime.upgrades then
-    if state.stability >= STABILITY.unstableThreshold then
-      return 1
-    end
-    local t = 1 - (state.stability / STABILITY.unstableThreshold)
-    return lerp(1, STABILITY.minSpeedMultiplier, smoothstep(t))
-  end
-  return runtime.upgrades:stabilitySlowMultiplier()
-end
-
-function stabilityRecoveryBoostMultiplier()
-  if not runtime.upgrades then
-    if state.stabilityBoostTimer <= 0 then
-      return 1
-    end
-    local t = clamp(state.stabilityBoostTimer / STABILITY.recoveryBoostDuration, 0, 1)
-    return lerp(1, STABILITY.recoveryBoostMultiplier, smoothstep(t))
-  end
-  return runtime.upgrades:stabilityRecoveryBoostMultiplier()
+local function speedWaveBoostFor(_)
+  return 0
 end
 
 function blackHoleStabilitySpeedMultiplier()
-  if not runtime.upgrades then
-    return stabilitySlowMultiplier() * stabilityRecoveryBoostMultiplier()
-  end
-  return runtime.upgrades:blackHoleStabilitySpeedMultiplier()
+  return 1
 end
 
-function isBlackHoleUnstable()
-  if not runtime.upgrades then
-    return state.stability < STABILITY.unstableThreshold
+local function collectAllOrbiters()
+  local pool = {}
+  for _, megaPlanet in ipairs(state.megaPlanets) do
+    pool[#pool + 1] = megaPlanet
   end
-  return runtime.upgrades:isBlackHoleUnstable()
+  for _, planet in ipairs(state.planets) do
+    pool[#pool + 1] = planet
+  end
+  for _, moon in ipairs(state.moons) do
+    pool[#pool + 1] = moon
+    local childSatellites = moon.childSatellites or {}
+    for _, child in ipairs(childSatellites) do
+      pool[#pool + 1] = child
+    end
+  end
+  for _, satellite in ipairs(state.satellites) do
+    pool[#pool + 1] = satellite
+  end
+  return pool
 end
 
-function onBlackHoleStabilityClick()
-  if not runtime.upgrades then
-    local wasStable = state.stability >= STABILITY.recoveryThreshold
-    local wasMax = state.stability >= 1
-    state.stability = clamp(state.stability + STABILITY.clickGain, 0, 1)
-    state.stabilityIdleTimer = 0
-    if (not wasStable) and state.stability >= STABILITY.recoveryThreshold then
-      state.stabilityBoostTimer = STABILITY.recoveryBoostDuration
-    end
-    if (not wasMax) and state.stability >= 1 then
-      state.stabilityMaxFxTimer = STABILITY.maxFxDuration
-    end
+local function computeTotalRpm()
+  local totalRpm = 0
+  local stabilitySpeedMultiplier = blackHoleStabilitySpeedMultiplier()
+  for _, orbiter in ipairs(collectAllOrbiters()) do
+    totalRpm = totalRpm + orbiter.speed * (1 + orbiter.boost + speedWaveBoostFor(orbiter)) * stabilitySpeedMultiplier * RAD_PER_SECOND_TO_RPM
+  end
+  return totalRpm
+end
+
+local function triggerGravityPulse()
+  state.speedWaveRipples[#state.speedWaveRipples + 1] = {
+    age = 0,
+    life = SPEED_WAVE_RIPPLE_LIFETIME,
+  }
+end
+
+local function refillDrawPileIfEmpty()
+  if #state.drawPile > 0 or #state.discardPile == 0 then
     return
   end
-  return runtime.upgrades:onBlackHoleStabilityClick()
-end
-
-local function buySpeedWave()
-  if not runtime.upgrades then
-    return false
+  for i = 1, #state.discardPile do
+    state.drawPile[#state.drawPile + 1] = state.discardPile[i]
   end
-  return runtime.upgrades:buySpeedWave()
-end
-
-local function buySpeedClick()
-  if not runtime.upgrades then
-    return false
+  for i = #state.discardPile, 1, -1 do
+    state.discardPile[i] = nil
   end
-  return runtime.upgrades:buySpeedClick()
+  shuffleInPlace(state.drawPile)
 end
 
-local function buyBlackHoleShader()
-  if not runtime.upgrades then
-    return false
-  end
-  return runtime.upgrades:buyBlackHoleShader()
-end
-
-local function onUpgradePurchased()
-  if upgradeFx then
-    local voice = upgradeFx:clone()
-    voice:setVolume(0)
-    local duration = voice:getDuration("seconds") or 0
-    if duration > UPGRADE_FX_START_OFFSET_SECONDS then
-      voice:seek(UPGRADE_FX_START_OFFSET_SECONDS, "seconds")
+local function drawCards(count)
+  for _ = 1, count do
+    refillDrawPileIfEmpty()
+    if #state.drawPile == 0 then
+      return
     end
-    voice:play()
-    upgradeFxInstances[#upgradeFxInstances + 1] = {source = voice, age = 0}
-    bgMusicDuckTimer = BG_MUSIC_DUCK_SECONDS
+    state.hand[#state.hand + 1] = table.remove(state.drawPile)
   end
+end
+
+local function discardCurrentHand()
+  for i = #state.hand, 1, -1 do
+    state.discardPile[#state.discardPile + 1] = state.hand[i]
+    state.hand[i] = nil
+  end
+end
+
+local function setOrbiterRpm(orbiter, rpm)
+  if not orbiter then
+    return
+  end
+  orbiter.speed = rpm * RPM_TO_RAD_PER_SECOND
+end
+
+local function addRpmToAllOrbiters(deltaRpm)
+  local delta = deltaRpm * RPM_TO_RAD_PER_SECOND
+  for _, orbiter in ipairs(collectAllOrbiters()) do
+    orbiter.speed = math.max(0, orbiter.speed + delta)
+  end
+end
+
+local function selectedMoonParent()
+  local selected = state.selectedOrbiter
+  if selected and (selected.kind == "planet" or selected.kind == "mega-planet") then
+    return selected
+  end
+  return nil
+end
+
+local function applyCard(cardId)
+  if cardId == "moon" then
+    local before = #state.moons
+    if not addMoon(selectedMoonParent()) then
+      return false
+    end
+    setOrbiterRpm(state.moons[before + 1], CARD_DEFS.moon.rpm)
+    return true
+  elseif cardId == "satellite" then
+    local before = #state.satellites
+    if not addSatellite() then
+      return false
+    end
+    setOrbiterRpm(state.satellites[before + 1], CARD_DEFS.satellite.rpm)
+    return true
+  elseif cardId == "planet" then
+    local before = #state.planets
+    if not addPlanet() then
+      return false
+    end
+    setOrbiterRpm(state.planets[before + 1], CARD_DEFS.planet.rpm)
+    return true
+  elseif cardId == "megaPlanet" then
+    local before = #state.megaPlanets
+    if not addMegaPlanet() then
+      return false
+    end
+    setOrbiterRpm(state.megaPlanets[before + 1], CARD_DEFS.megaPlanet.rpm)
+    return true
+  elseif cardId == "speedWave" then
+    addRpmToAllOrbiters(1)
+    return true
+  end
+  return false
+end
+
+local function beginTurn(turnNumber)
+  state.turn = turnNumber
+  state.energy = TURN_ENERGY
+  drawCards(STARTING_HAND_SIZE)
+  if state.turn == state.maxTurns and not state.lastTurnPulsePlayed then
+    triggerGravityPulse()
+    state.lastTurnPulsePlayed = true
+  end
+end
+
+local function endPlayerTurn()
+  discardCurrentHand()
+  if state.turn >= state.maxTurns then
+    state.runComplete = true
+    state.runWon = computeTotalRpm() >= state.objectiveRpm
+    return
+  end
+  beginTurn(state.turn + 1)
+end
+
+local function playCard(handIndex)
+  if state.runComplete then
+    return false
+  end
+  local beforeRpm = computeTotalRpm()
+  local cardId = state.hand[handIndex]
+  if not cardId then
+    return false
+  end
+  local cardDef = CARD_DEFS[cardId]
+  if not cardDef or state.energy < cardDef.cost then
+    return false
+  end
+  if not applyCard(cardId) then
+    return false
+  end
+  state.energy = state.energy - cardDef.cost
+  table.remove(state.hand, handIndex)
+  state.discardPile[#state.discardPile + 1] = cardId
+  local afterRpm = computeTotalRpm()
+  state.rpmRollFrom = math.floor(beforeRpm + 0.5)
+  state.rpmRollTo = math.floor(afterRpm + 0.5)
+  state.rpmRollTimer = state.rpmRollDuration
+  playMenuBuyClickFx()
+  return true
+end
+
+local function startCardRun()
+  state.hand = {}
+  state.drawPile = {}
+  state.discardPile = {}
+  for i = 1, #STARTING_DECK do
+    state.drawPile[#state.drawPile + 1] = STARTING_DECK[i]
+  end
+  shuffleInPlace(state.drawPile)
+  state.turn = 1
+  state.energy = TURN_ENERGY
+  state.runComplete = false
+  state.runWon = false
+  state.lastTurnPulsePlayed = false
+  state.rpmRollFrom = 0
+  state.rpmRollTo = 0
+  state.rpmRollTimer = 0
+  beginTurn(1)
+end
+
+function switchScreen(screenId)
+  state.screen = screenId
+  state.selectedOrbiter = nil
+  state.selectedLightSource = false
+end
+
+function openMainMenu()
+  switchScreen("main_menu")
+end
+
+function openDeckMenu()
+  switchScreen("deck_menu")
+end
+
+function startRunFromMenu()
+  startCardRun()
+  switchScreen("run")
 end
 
 local function onPlanetClicked()
-  if not runtime.upgrades then
-    return
-  end
-  runtime.upgrades:onPlanetClicked()
+  state.planetBounceTime = PLANET_BOUNCE_DURATION
 end
 
 local function initGameSystems()
   runtime.modifiers = Systems.Modifier.new()
-
-  runtime.economy = Systems.Economy.new({
-    state = state,
-    modifiers = runtime.modifiers,
-    costs = {
-      moon = MOON_COST,
-      planet = PLANET_COST,
-      megaPlanet = MEGA_PLANET_COST,
-      satellite = SATELLITE_COST,
-      moonSatellite = MOON_SATELLITE_COST,
-      speedWave = SPEED_WAVE_COST,
-      speedClick = SPEED_CLICK_COST,
-      blackHoleShader = BLACK_HOLE_SHADER_COST,
-    },
-  })
-
-  runtime.progression = Systems.Progression.new({
-    state = state,
-    modifiers = runtime.modifiers,
-  })
-
-  runtime.upgrades = Systems.Upgrades.new({
-    state = state,
-    economy = runtime.economy,
-    modifiers = runtime.modifiers,
-    stability = STABILITY,
-    speedWaveDuration = SPEED_WAVE_DURATION,
-    speedWaveMultiplier = SPEED_WAVE_MULTIPLIER,
-    speedWaveClickThreshold = SPEED_WAVE_CLICK_THRESHOLD,
-    speedWaveRippleLifetime = SPEED_WAVE_RIPPLE_LIFETIME,
-    speedWaveTextLifetime = SPEED_WAVE_TEXT_LIFETIME,
-    planetBounceDuration = PLANET_BOUNCE_DURATION,
-    onUpgradePurchased = onUpgradePurchased,
-    onPlanetImpulse = function()
-      triggerPlanetImpulse()
+  local freeEconomy = {
+    trySpendCost = function()
+      return true
     end,
-    mousePositionProvider = function()
-      return love.mouse.getPosition()
+    getCost = function()
+      return 0
     end,
-  })
-
+  }
   runtime.orbiters = Systems.Orbiters.new({
     state = state,
-    economy = runtime.economy,
+    economy = freeEconomy,
     modifiers = runtime.modifiers,
     orbitConfigs = ORBIT_CONFIGS,
     bodyVisual = BODY_VISUAL,
@@ -1025,20 +1030,13 @@ local function initGameSystems()
     updateOrbiterPosition = updateOrbiterPosition,
     assignRenderOrder = assignRenderOrder,
     getStabilitySpeedMultiplier = function()
-      return runtime.upgrades:blackHoleStabilitySpeedMultiplier()
+      return 1
     end,
-    getTransientBoost = function(orbiter)
-      return runtime.upgrades:getSpeedWaveBoost(orbiter)
+    getTransientBoost = function()
+      return 0
     end,
-    onOrbitGainFx = spawnOrbitGainFx,
-    onOrbitsEarned = function(count)
-      if runtime.progression then
-        runtime.progression:onOrbitsEarned(count)
-      end
-    end,
+    disableOrbitRewards = true,
   })
-
-  runtime.progression:update()
 end
 
 local function drawBackground()
@@ -1525,390 +1523,289 @@ function drawHoverTooltip(lines, anchorBtn, uiScale, lineH, preferLeft)
   end
 end
 
-function drawStabilityGauge(uiScale, counterY)
-  local px = math.max(1, math.floor(uiScale + 0.5))
-  local segCount = STABILITY.segmentCount
-  local segW = 5 * px
-  local segGap = px
-  local innerH = 8 * px
-  local barsW = segCount * segW + (segCount - 1) * segGap
-  local barsH = innerH
-  local barsX = math.floor(offsetX + (GAME_W * scale - barsW) * 0.5)
-  local barsY = math.max(offsetY + 4 * px, math.floor(counterY - barsH - 9 * px))
-  local stability = clamp(state.stability, 0, 1)
-  local filledSegments = math.floor(stability * segCount + 1e-6)
-  local unstableSegment = math.max(1, math.min(segCount, math.floor(STABILITY.unstableThreshold * segCount + 0.5)))
-  local markerSegment = math.max(1, math.min(segCount, filledSegments))
-  local pulse = isBlackHoleUnstable() and (0.75 + 0.25 * (0.5 + 0.5 * math.sin(state.time * 10))) or 1
-  local maxFxActive = state.stabilityMaxFxTimer > 0 and STABILITY.maxFxDuration > 0
-  local maxFxCenter = 1
-  if maxFxActive then
-    local rawT = 1 - clamp(state.stabilityMaxFxTimer / STABILITY.maxFxDuration, 0, 1)
-    local steps = 18
-    local step = math.floor(rawT * steps + 1e-6)
-    local stepT = step / steps
-    maxFxCenter = 1 + stepT * (segCount - 1)
-  end
-
-  ui.stabilityGauge.x = barsX
-  ui.stabilityGauge.y = barsY - 4 * px
-  ui.stabilityGauge.w = barsW
-  ui.stabilityGauge.h = barsH + 8 * px
-
-  for i = 1, segCount do
-    local segX = barsX + (i - 1) * (segW + segGap)
-    if i <= filledSegments then
-      local baseColor = i <= unstableSegment and swatch.bright or swatch.brightest
-      local baseAlpha = i <= unstableSegment and (0.95 * pulse) or 0.90
-      local segY = barsY
-      if maxFxActive then
-        local dist = math.abs(i - maxFxCenter)
-        local waveLevel = 0
-        if dist <= 0.6 then
-          waveLevel = 1
-        elseif dist <= 1.4 then
-          waveLevel = 0.72
-        elseif dist <= 2.2 then
-          waveLevel = 0.46
-        elseif dist <= 3.0 then
-          waveLevel = 0.24
-        end
-        local lift = math.floor(4 * px * waveLevel + 0.5)
-        segY = barsY - lift
-        setColorBlendScaled(baseColor, swatch.brightest, waveLevel, 1, baseAlpha + waveLevel * 0.30)
-      else
-        setColorScaled(baseColor, 1, baseAlpha)
-      end
-      love.graphics.rectangle("fill", segX, segY, segW, innerH)
-      setColorScaled(swatch.darkest, 1, 0.35)
-      love.graphics.rectangle("fill", segX, segY + innerH - px, segW, px)
-    else
-      setColorScaled(swatch.nearDark, 1, 0.88)
-      love.graphics.rectangle("fill", segX, barsY, segW, innerH)
-    end
-  end
-
-  local markerX = barsX + (markerSegment - 1) * (segW + segGap) + math.floor(segW * 0.5)
-  local markerWaveLevel = 0
-  if maxFxActive then
-    local dist = math.abs(markerSegment - maxFxCenter)
-    if dist <= 0.6 then
-      markerWaveLevel = 1
-    elseif dist <= 1.4 then
-      markerWaveLevel = 0.72
-    elseif dist <= 2.2 then
-      markerWaveLevel = 0.46
-    elseif dist <= 3.0 then
-      markerWaveLevel = 0.24
-    end
-  end
-  local markerY = barsY - 4 * px - math.floor(4 * px * markerWaveLevel + 0.5)
-  local markerSize = px
-  if maxFxActive then
-    markerSize = px + math.max(1, math.floor(px * 0.75 * markerWaveLevel + 0.5))
-  end
-  if markerSegment <= unstableSegment then
-    local markerAlpha = pulse
-    if maxFxActive then
-      markerAlpha = markerAlpha + markerWaveLevel * 0.2
-    end
-    setColorScaled(swatch.bright, 1, markerAlpha)
-  else
-    local markerAlpha = pulse
-    if maxFxActive then
-      markerAlpha = markerAlpha + markerWaveLevel * 0.32
-    end
-    setColorScaled(swatch.brightest, 1, markerAlpha)
-  end
-  love.graphics.rectangle("fill", markerX - markerSize, markerY, markerSize * 2 + px, markerSize)
-  love.graphics.rectangle("fill", markerX, markerY - markerSize, markerSize, markerSize * 2 + px)
-end
-
 local function drawHud()
   local font = love.graphics.getFont()
-  local lineH = math.floor(font:getHeight())
   local uiScale = scale >= 1 and scale or 1
+  local lineH = math.floor(font:getHeight())
   local mouseX, mouseY = love.mouse.getPosition()
-  local counterFont = getOrbitCounterFont()
-  local counterText = tostring(state.orbits)
-  local counterTextW = counterFont:getWidth(counterText)
-  local counterTextH = counterFont:getHeight()
-  local counterW = counterTextW
-  local counterCenterX = offsetX + (GAME_W * scale) * 0.5
-  local counterX = counterCenterX - counterW * 0.5
-  local counterY = offsetY + math.floor(8 * uiScale)
-
-  love.graphics.setFont(counterFont)
-  love.graphics.setColor(palette.text)
-  drawText(counterText, counterX, counterY)
-
-  local totalRpm = 0
-  local stabilitySpeedMultiplier = blackHoleStabilitySpeedMultiplier()
-  for _, megaPlanet in ipairs(state.megaPlanets) do
-    totalRpm = totalRpm + megaPlanet.speed * (1 + megaPlanet.boost + speedWaveBoostFor(megaPlanet)) * stabilitySpeedMultiplier * RAD_PER_SECOND_TO_RPM
+  local viewportX = offsetX
+  local viewportY = offsetY
+  local viewportW = GAME_W * scale
+  local viewportH = GAME_H * scale
+  local totalRpm = computeTotalRpm()
+  local rpmInt = math.floor(totalRpm + 0.5)
+  local rpmFont = getRpmDisplayFont()
+  local rpmY = viewportY + math.floor(4 * uiScale)
+  local shownRpm = rpmInt
+  if state.rpmRollTimer > 0 and state.rpmRollFrom ~= state.rpmRollTo then
+    local t = 1 - clamp(state.rpmRollTimer / state.rpmRollDuration, 0, 1)
+    local eased = smoothstep(t)
+    shownRpm = math.floor(lerp(state.rpmRollFrom, state.rpmRollTo, eased) + 0.5)
   end
-  for _, planet in ipairs(state.planets) do
-    totalRpm = totalRpm + planet.speed * (1 + planet.boost + speedWaveBoostFor(planet)) * stabilitySpeedMultiplier * RAD_PER_SECOND_TO_RPM
-  end
-  for _, moon in ipairs(state.moons) do
-    totalRpm = totalRpm + moon.speed * (1 + moon.boost + speedWaveBoostFor(moon)) * stabilitySpeedMultiplier * RAD_PER_SECOND_TO_RPM
-    local childSatellites = moon.childSatellites or {}
-    for _, child in ipairs(childSatellites) do
-      totalRpm = totalRpm + child.speed * (1 + child.boost + speedWaveBoostFor(child)) * stabilitySpeedMultiplier * RAD_PER_SECOND_TO_RPM
-    end
-  end
-  for _, satellite in ipairs(state.satellites) do
-    totalRpm = totalRpm + satellite.speed * (1 + satellite.boost + speedWaveBoostFor(satellite)) * stabilitySpeedMultiplier * RAD_PER_SECOND_TO_RPM
-  end
-
-  local rpmText = string.format("%.2f rpm", totalRpm)
-  local rpmTextW = font:getWidth(rpmText)
-  local rpmX = counterCenterX - rpmTextW * 0.5
-  local rpmY = counterY + counterTextH + math.floor(2 * uiScale)
+  love.graphics.setFont(rpmFont)
+  local rpmText = tostring(shownRpm)
+  setColorScaled(swatch.bright, 1, 1)
+  drawText(rpmText, viewportX + viewportW * 0.5 - rpmFont:getWidth(rpmText) * 0.5, rpmY)
   love.graphics.setFont(font)
-  setColorScaled(palette.accent, 1, 1)
-  drawText(rpmText, rpmX, rpmY)
+  local rpmLabelY = rpmY + rpmFont:getHeight() - math.floor(8 * uiScale)
+  local rpmLabel = "rpm"
+  setColorScaled(palette.text, 1, 0.9)
+  drawText(rpmLabel, viewportX + viewportW * 0.5 - font:getWidth(rpmLabel) * 0.5, rpmLabelY)
 
-  local panelX = math.floor(offsetX + 12 * uiScale)
-  local panelY = math.floor(offsetY + 12 * uiScale)
-  local panelW = math.floor(292 * uiScale)
-  local padX = math.floor(8 * uiScale)
-  local rowH = lineH + math.floor(5 * uiScale)
-  local gap = math.floor(2 * uiScale)
-  local rowTextInsetY = math.floor(2 * uiScale)
-  local y = panelY + math.floor(6 * uiScale)
+  local objectiveText = string.format("objective: get to %d rpm", state.objectiveRpm)
+  local objectiveX = viewportX + viewportW - font:getWidth(objectiveText) - math.floor(10 * uiScale)
+  local objectiveY = viewportY + math.floor(10 * uiScale)
+  setColorScaled(palette.text, 1, 0.92)
+  drawText(objectiveText, objectiveX, objectiveY)
 
-  local function drawHeader(text)
-    love.graphics.setColor(palette.text)
-    drawText(text, panelX + padX, y)
-    y = y + lineH + math.floor(2 * uiScale)
-  end
+  local endBtn = ui.endTurnBtn
+  endBtn.w = math.floor(END_TURN_W * uiScale)
+  endBtn.h = math.floor(END_TURN_H * uiScale)
+  endBtn.x = viewportX + viewportW - endBtn.w - math.floor(10 * uiScale)
+  endBtn.y = viewportY + viewportH - endBtn.h - math.floor(12 * uiScale)
+  local canEndTurn = not state.runComplete
+  local endHovered = pointInRect(mouseX, mouseY, endBtn)
+  local endAlpha = canEndTurn and 1 or 0.45
+  setColorScaled(swatch.brightest, 1, (endHovered and 1 or 0.92) * endAlpha)
+  love.graphics.rectangle("fill", endBtn.x, endBtn.y, endBtn.w, endBtn.h)
+  setColorScaled(swatch.darkest, 1, (endHovered and 1 or 0.88) * endAlpha)
+  love.graphics.rectangle("line", endBtn.x, endBtn.y, endBtn.w, endBtn.h)
+  setColorScaled(swatch.darkest, 1, endAlpha)
+  local endLabel = "end turn"
+  drawText(endLabel, endBtn.x + math.floor((endBtn.w - font:getWidth(endLabel)) * 0.5), endBtn.y + math.floor((endBtn.h - lineH) * 0.5))
 
-  local function drawRow(btn, label, status, enabled, orbitCost, statusStyle)
-    btn.x = panelX + padX
-    btn.y = y
-    btn.w = panelW - padX * 2
-    btn.h = rowH
-    local alpha = enabled and 1 or 0.40
-    local hovered = pointInRect(mouseX, mouseY, btn)
-    if hovered then
-      setColorScaled(swatch.brightest, 1, 0.95 * alpha)
-      love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h)
-    end
-    setColorScaled(palette.text, 1, alpha)
-    drawText(label, btn.x + math.floor(8 * uiScale), btn.y + rowTextInsetY)
-    if status and status ~= "" then
-      local sw = font:getWidth(status)
-      local statusX = btn.x + btn.w - sw - math.floor(8 * uiScale)
-      if statusStyle == "rainbow-fast" then
-        local pulse = 0.5 + 0.5 * math.sin((state.time / 1.2) * TWO_PI)
-        local blend = smoothstep(pulse)
-        local r = lerp(swatch.bright[1], swatch.mid[1], blend)
-        local g = lerp(swatch.bright[2], swatch.mid[2], blend)
-        local b = lerp(swatch.bright[3], swatch.mid[3], blend)
-        setColorDirect(r, g, b, alpha)
-        drawText(status, statusX, btn.y + rowTextInsetY)
-      else
-        setColorScaled(palette.text, 1, alpha)
-        drawText(status, statusX, btn.y + rowTextInsetY)
-      end
-    end
-    y = y + rowH + gap
-    return hovered
-  end
+  local cardW = math.floor(CARD_W * uiScale)
+  local cardH = math.floor(CARD_H * uiScale)
+  local cardGap = math.floor(CARD_GAP * uiScale)
+  local handCount = #state.hand
+  local handW = handCount > 0 and (handCount * cardW + (handCount - 1) * cardGap) or 0
+  local cardY = viewportY + viewportH - cardH - math.floor(12 * uiScale)
+  local startX = viewportX + math.floor((viewportW - handW) * 0.5)
+  local fixedSlots = 4
+  local fixedHandW = fixedSlots * cardW + (fixedSlots - 1) * cardGap
+  local fixedStartX = viewportX + math.floor((viewportW - fixedHandW) * 0.5)
 
-  local megaPlanetBuyCost = megaPlanetCost()
-  local planetBuyCost = planetCost()
-  local moonBuyCost = moonCost()
-  local moonIsFree = moonBuyCost <= 0
-  local moonStatus = moonIsFree and "free" or tostring(moonBuyCost)
-  local moonStatusStyle = moonIsFree and "rainbow-fast" or nil
-  local canBuyMegaPlanet = state.orbits >= megaPlanetBuyCost
-  local canBuyPlanet = state.orbits >= planetBuyCost
-  local canBuyMoon = #state.moons < MAX_MOONS and (moonIsFree or state.orbits >= moonBuyCost)
-  local canBuySatellite = #state.satellites < MAX_SATELLITES and state.orbits >= satelliteCost()
-  local satelliteStatus = tostring(satelliteCost())
-  local speedWaveReady = state.speedWaveUnlocked or state.orbits >= speedWaveCost()
-  local speedClickReady = state.speedClickUnlocked or state.orbits >= speedClickCost()
-  local blackHoleShaderReady = state.blackHoleShaderUnlocked or state.orbits >= blackHoleShaderCost()
-  local waveStatus = state.speedWaveUnlocked and (state.speedWaveTimer > 0 and "on" or tostring(state.planetClickCount % SPEED_WAVE_CLICK_THRESHOLD) .. "/" .. tostring(SPEED_WAVE_CLICK_THRESHOLD)) or tostring(speedWaveCost())
-  local clickStatus = state.speedClickUnlocked and "owned" or tostring(speedClickCost())
-  local blackHoleShaderStatus = state.blackHoleShaderUnlocked and "owned" or tostring(blackHoleShaderCost())
+  local turnText = string.format("turn %d/%d", state.turn, state.maxTurns)
+  local energyText = string.format("energy %d", state.energy)
+  local infoY = cardY - lineH * 2 - math.floor(10 * uiScale)
+  setColorScaled(palette.text, 1, 0.92)
+  drawText(turnText, viewportX + viewportW * 0.5 - font:getWidth(turnText) * 0.5, infoY)
+  drawText(energyText, viewportX + viewportW * 0.5 - font:getWidth(energyText) * 0.5, infoY + lineH + math.floor(2 * uiScale))
 
-  local sectionCount = 2
-  local rowCount = 7
-  local panelH = math.floor(6 * uiScale) + sectionCount * (lineH + math.floor(2 * uiScale)) + rowCount * (rowH + gap) + math.floor(4 * uiScale)
+  local pileW = math.floor(94 * uiScale)
+  local pileH = math.floor(56 * uiScale)
+  ui.drawPile.x = fixedStartX - pileW - math.floor(12 * uiScale)
+  ui.drawPile.y = cardY + math.floor((cardH - pileH) * 0.5)
+  ui.drawPile.w = pileW
+  ui.drawPile.h = pileH
+  ui.discardPile.x = fixedStartX + fixedHandW + math.floor(12 * uiScale)
+  ui.discardPile.y = ui.drawPile.y
+  ui.discardPile.w = pileW
+  ui.discardPile.h = pileH
+
+  setColorScaled(swatch.brightest, 1, 0.95)
+  love.graphics.rectangle("fill", ui.drawPile.x, ui.drawPile.y, ui.drawPile.w, ui.drawPile.h)
+  love.graphics.rectangle("fill", ui.discardPile.x, ui.discardPile.y, ui.discardPile.w, ui.discardPile.h)
+  setColorScaled(swatch.darkest, 1, 0.95)
+  love.graphics.rectangle("line", ui.drawPile.x, ui.drawPile.y, ui.drawPile.w, ui.drawPile.h)
+  love.graphics.rectangle("line", ui.discardPile.x, ui.discardPile.y, ui.discardPile.w, ui.discardPile.h)
+  setColorScaled(swatch.darkest, 1, 0.95)
+  drawText("draw", ui.drawPile.x + math.floor(8 * uiScale), ui.drawPile.y + math.floor(5 * uiScale))
+  drawText(tostring(#state.drawPile), ui.drawPile.x + math.floor(8 * uiScale), ui.drawPile.y + math.floor(5 * uiScale) + lineH)
+  drawText("discard", ui.discardPile.x + math.floor(8 * uiScale), ui.discardPile.y + math.floor(5 * uiScale))
+  drawText(tostring(#state.discardPile), ui.discardPile.x + math.floor(8 * uiScale), ui.discardPile.y + math.floor(5 * uiScale) + lineH)
 
   local hoveredTooltipLines
   local hoveredTooltipBtn
-
-  love.graphics.setScissor(panelX + 1, panelY + 1, panelW - 2, panelH - 2)
-
-  drawHeader("generators")
-  local megaPlanetHovered = drawRow(ui.buyMegaPlanetBtn, "mega planet", tostring(megaPlanetBuyCost), canBuyMegaPlanet, true)
-  if megaPlanetHovered then
-    hoveredTooltipBtn = ui.buyMegaPlanetBtn
-    hoveredTooltipLines = {
-      {
-        pre = "Adds a massive planet orbiting the core.",
-        hi = "",
-        post = "",
-      },
-      {
-        pre = "Size is ",
-        hi = "5x",
-        post = " the main planet.",
-      },
-    }
+  for i = #ui.cardButtons, handCount + 1, -1 do
+    ui.cardButtons[i] = nil
+    state.cardHoverLift[i] = nil
   end
-  local planetHovered = drawRow(ui.buyPlanetBtn, "planet", tostring(planetBuyCost), canBuyPlanet, true)
-  if planetHovered then
-    hoveredTooltipBtn = ui.buyPlanetBtn
-    hoveredTooltipLines = {
-      {
-        pre = "Adds a large planet orbiting the core.",
-        hi = "",
-        post = "",
-      },
-      {
-        pre = "Size is ",
-        hi = "80%",
-        post = " of the main planet.",
-      },
-    }
+  for i = 1, handCount do
+    local cardId = state.hand[i]
+    local cardDef = CARD_DEFS[cardId]
+    local btn = ui.cardButtons[i] or {}
+    ui.cardButtons[i] = btn
+    local hoverLift = state.cardHoverLift[i] or 0
+    btn.x = startX + (i - 1) * (cardW + cardGap)
+    btn.y = cardY - hoverLift
+    btn.w = cardW
+    btn.h = cardH
+    btn.cardId = cardId
+    btn.index = i
+    local hovered = pointInRect(mouseX, mouseY, btn)
+    local targetLift = hovered and (6 * uiScale) or 0
+    hoverLift = hoverLift + (targetLift - hoverLift) * 0.22
+    state.cardHoverLift[i] = hoverLift
+    btn.y = cardY - hoverLift
+    hovered = pointInRect(mouseX, mouseY, btn)
+    local playable = (not state.runComplete) and cardDef and (state.energy >= cardDef.cost)
+    local alpha = playable and 1 or 0.45
+    setColorScaled(swatch.darkest, 1, 0.92 * alpha)
+    love.graphics.rectangle("fill", btn.x, btn.y, btn.w, btn.h)
+    setColorScaled(swatch.brightest, 1, (hovered and 1 or 0.75) * alpha)
+    love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h)
+    setColorScaled(palette.text, 1, alpha)
+    local costText = cardDef and (tostring(cardDef.cost) .. " energy") or "? energy"
+    drawText(costText, btn.x + math.floor(8 * uiScale), btn.y + math.floor(6 * uiScale))
+    drawText(cardDef and cardDef.name or cardId, btn.x + math.floor(8 * uiScale), btn.y + lineH + math.floor(12 * uiScale))
+    drawText(cardDef and cardDef.line or "", btn.x + math.floor(8 * uiScale), btn.y + lineH * 2 + math.floor(18 * uiScale))
+    if hovered and cardDef then
+      hoveredTooltipBtn = btn
+      hoveredTooltipLines = {
+        {pre = cardDef.tooltip or "", hi = "", post = ""},
+        {pre = "cost ", hi = tostring(cardDef.cost), post = " energy"},
+      }
+      if cardDef.rpm then
+        hoveredTooltipLines[#hoveredTooltipLines + 1] = {pre = "sets speed to ", hi = tostring(cardDef.rpm) .. " rpm", post = ""}
+      else
+        hoveredTooltipLines[#hoveredTooltipLines + 1] = {pre = "effect ", hi = "+1 rpm", post = " to all orbiters"}
+      end
+    end
   end
-  local moonHovered = drawRow(ui.buyMoonBtn, "moon", moonStatus, canBuyMoon, true, moonStatusStyle)
-  if moonHovered then
-    hoveredTooltipBtn = ui.buyMoonBtn
-    hoveredTooltipLines = {
-      {
-        pre = "Adds a moon orbiting the planet.",
-        hi = "",
-        post = "",
-      },
-      {
-        pre = "Moons can host ",
-        hi = "moon satellites",
-        post = ".",
-      },
-    }
-  end
-  local satelliteHovered = drawRow(ui.buySatelliteBtn, "satellite", satelliteStatus, canBuySatellite)
-  if satelliteHovered then
-    hoveredTooltipBtn = ui.buySatelliteBtn
-    hoveredTooltipLines = {
-      {
-        pre = "Adds a satellite orbiting the planet.",
-        hi = "",
-        post = "",
-      },
-      {
-        pre = "Satellites generate ",
-        hi = "orbits",
-        post = " when clicked.",
-      },
-    }
-  end
-
-  drawHeader("upgrades")
-  local waveHovered = drawRow(ui.speedWaveBtn, "speed wave", waveStatus, speedWaveReady, not state.speedWaveUnlocked)
-  if waveHovered then
-    hoveredTooltipBtn = ui.speedWaveBtn
-    hoveredTooltipLines = {
-      {
-        pre = "Satellites and moon satellites get ",
-        hi = string.format("+%d%% speed for %ds", math.floor((SPEED_WAVE_MULTIPLIER - 1) * 100 + 0.5), SPEED_WAVE_DURATION),
-        post = ".",
-      },
-      {
-        pre = "Re-triggering refreshes duration; ",
-        hi = "it does not stack",
-        post = ".",
-      },
-    }
-  end
-  local clickHovered = drawRow(ui.speedClickBtn, "speed click", clickStatus, speedClickReady, not state.speedClickUnlocked)
-  if clickHovered then
-    hoveredTooltipBtn = ui.speedClickBtn
-    hoveredTooltipLines = {
-      {
-        pre = "Planet clicks apply ",
-        hi = string.format("+%d%% speed for %ds", math.floor(PLANET_IMPULSE_TARGET_BOOST * 100 + 0.5), PLANET_IMPULSE_DURATION),
-        post = " to a random orbiter.",
-      },
-      {
-        pre = "Repeated hits on the same target ",
-        hi = "stack",
-        post = ".",
-      },
-    }
-  end
-  local blackHoleShaderHovered = drawRow(ui.blackHoleShaderBtn, "black hole shader", blackHoleShaderStatus, blackHoleShaderReady, not state.blackHoleShaderUnlocked)
-  if blackHoleShaderHovered then
-    hoveredTooltipBtn = ui.blackHoleShaderBtn
-    hoveredTooltipLines = {
-      {
-        pre = "Enables the black hole distortion around the core.",
-        hi = "",
-        post = "",
-      },
-      {
-        pre = "This upgrade is ",
-        hi = "visual only",
-        post = ".",
-      },
-    }
-  end
-
-  local descAlpha = state.speedClickUnlocked and 1 or 0.58
-  setColorScaled(palette.text, 1, descAlpha)
-  drawText("planet clicks accelerate a random orbiter", panelX + padX, y)
-  love.graphics.setScissor()
-
-  drawHoverTooltip(hoveredTooltipLines, hoveredTooltipBtn, uiScale, lineH, false)
-  drawStabilityGauge(uiScale, counterY)
-
-  love.graphics.setColor(palette.muted)
-  local viewportBottom = offsetY + GAME_H * scale
-  local helpY1 = math.floor(viewportBottom - lineH * 3 - 12 * uiScale)
-  local helpY2 = math.floor(viewportBottom - lineH * 2 - 8 * uiScale)
-  local helpY3 = math.floor(viewportBottom - lineH - 4 * uiScale)
-  local helpX = panelX
-  drawText(string.format("zoom %.2fx  scroll to zoom", zoom), helpX, helpY1)
-  drawText("l dither " .. (state.sphereDitherEnabled and "on" or "off"), helpX, helpY2)
-  drawText("b fullscreen", helpX, helpY3)
+  drawHoverTooltip(hoveredTooltipLines, hoveredTooltipBtn, uiScale, lineH, true)
 end
 
-function getOrbiterAction(orbiter)
-  if orbiter.kind == "planet" or orbiter.kind == "mega-planet" then
-    local cost = moonCost()
-    local firstMoonFree = cost <= 0
-    return {
-      action = "buy-moon",
-      label = "moon",
-      price = firstMoonFree and "free" or tostring(cost),
-      priceStyle = firstMoonFree and "rainbow-fast" or nil,
-      enabled = #state.moons < MAX_MOONS and (firstMoonFree or state.orbits >= cost),
-      tooltipLines = {
-        {pre = "Adds a moon orbiting this planet.", hi = "", post = ""},
-        {pre = "Moons can host ", hi = "satellites", post = "."},
-      },
-    }
+function drawMainMenu()
+  local font = love.graphics.getFont()
+  local uiScale = scale >= 1 and scale or 1
+  local lineH = math.floor(font:getHeight())
+  local mouseX, mouseY = love.mouse.getPosition()
+  local viewportX = offsetX
+  local viewportY = offsetY
+  local viewportW = GAME_W * scale
+  local viewportH = GAME_H * scale
+
+  local title = "orbit protocol"
+  local titleFont = getRpmDisplayFont()
+  love.graphics.setFont(titleFont)
+  setColorScaled(swatch.bright, 1, 1)
+  drawText(title, viewportX + viewportW * 0.5 - titleFont:getWidth(title) * 0.5, viewportY + math.floor(viewportH * 0.22))
+  love.graphics.setFont(font)
+
+  local btnW = math.floor(220 * uiScale)
+  local btnH = lineH + math.floor(12 * uiScale)
+  local startY = viewportY + math.floor(viewportH * 0.58)
+  local gap = math.floor(12 * uiScale)
+  local btnX = viewportX + math.floor((viewportW - btnW) * 0.5)
+
+  local function drawMenuButton(btn, label, y)
+    btn.x = btnX
+    btn.y = y
+    btn.w = btnW
+    btn.h = btnH
+    local hovered = pointInRect(mouseX, mouseY, btn)
+    setColorScaled(swatch.darkest, 1, hovered and 1 or 0.9)
+    love.graphics.rectangle("fill", btn.x, btn.y, btn.w, btn.h)
+    setColorScaled(swatch.brightest, 1, hovered and 1 or 0.8)
+    love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h)
+    setColorScaled(palette.text, 1, 0.95)
+    drawText(label, btn.x + math.floor((btn.w - font:getWidth(label)) * 0.5), btn.y + math.floor((btn.h - lineH) * 0.5))
   end
-  if orbiter.kind == "moon" then
-    local cost = moonSatelliteCost()
-    return {
-      action = "buy-satellite",
-      label = "sattelite",
-      price = tostring(cost),
-      enabled = state.orbits >= cost,
-      tooltipLines = {
-        {pre = "Adds a satellite orbiting this moon.", hi = "", post = ""},
-        {pre = "Satellites generate ", hi = "orbits", post = " when clicked."},
-      },
-    }
+
+  drawMenuButton(ui.mainPlayBtn, "play", startY)
+  drawMenuButton(ui.mainDeckBtn, "deck", startY + btnH + gap)
+end
+
+function drawDeckMenu()
+  local font = love.graphics.getFont()
+  local uiScale = scale >= 1 and scale or 1
+  local lineH = math.floor(font:getHeight())
+  local mouseX, mouseY = love.mouse.getPosition()
+  local viewportX = offsetX
+  local viewportY = offsetY
+  local viewportW = GAME_W * scale
+  local viewportH = GAME_H * scale
+  local panelPad = math.floor(22 * uiScale)
+  local panelX = viewportX + panelPad
+  local panelY = viewportY + panelPad
+  local panelW = viewportW - panelPad * 2
+  local panelH = viewportH - panelPad * 2
+
+  setColorScaled(swatch.darkest, 1, 0.92)
+  love.graphics.rectangle("fill", panelX, panelY, panelW, panelH)
+  setColorScaled(swatch.brightest, 1, 0.9)
+  love.graphics.rectangle("line", panelX, panelY, panelW, panelH)
+
+  local headerPad = math.floor(12 * uiScale)
+  setColorScaled(palette.text, 1, 0.95)
+  drawText("deck menu", panelX + headerPad, panelY + headerPad)
+
+  local backBtn = ui.menuBackBtn
+  backBtn.w = math.floor(88 * uiScale)
+  backBtn.h = lineH + math.floor(8 * uiScale)
+  backBtn.x = panelX + panelW - backBtn.w - headerPad
+  backBtn.y = panelY + math.floor(8 * uiScale)
+  local backHovered = pointInRect(mouseX, mouseY, backBtn)
+  setColorScaled(swatch.brightest, 1, backHovered and 1 or 0.86)
+  love.graphics.rectangle("fill", backBtn.x, backBtn.y, backBtn.w, backBtn.h)
+  setColorScaled(swatch.darkest, 1, 1)
+  love.graphics.rectangle("line", backBtn.x, backBtn.y, backBtn.w, backBtn.h)
+  drawText("back", backBtn.x + math.floor((backBtn.w - font:getWidth("back")) * 0.5), backBtn.y + math.floor((backBtn.h - lineH) * 0.5))
+
+  local contentX = panelX + headerPad
+  local contentY = panelY + lineH + math.floor(24 * uiScale)
+  local contentW = panelW - headerPad * 2
+  local contentH = panelH - (contentY - panelY) - headerPad
+  local colGap = math.floor(10 * uiScale)
+  local colW = math.floor((contentW - colGap * 2) / 3)
+  local headers = {"deck", "inventory", "shop"}
+  local hoveredTooltipLines
+  local hoveredTooltipBtn
+
+  for i = 1, 3 do
+    local colX = contentX + (i - 1) * (colW + colGap)
+    local colY = contentY
+    setColorScaled(swatch.nearDark, 1, 0.95)
+    love.graphics.rectangle("fill", colX, colY, colW, contentH)
+    setColorScaled(swatch.brightest, 1, 0.7)
+    love.graphics.rectangle("line", colX, colY, colW, contentH)
+    setColorScaled(palette.text, 1, 0.95)
+    drawText(headers[i], colX + math.floor(10 * uiScale), colY + math.floor(8 * uiScale))
+
+    if headers[i] == "deck" then
+      local listX = colX + math.floor(10 * uiScale)
+      local listY = colY + lineH + math.floor(18 * uiScale)
+      local cardW = colW - math.floor(20 * uiScale)
+      local cardH = lineH * 3 + math.floor(16 * uiScale)
+      local cardGap = math.floor(8 * uiScale)
+      for n = #ui.deckCardButtons, #STARTING_DECK + 1, -1 do
+        ui.deckCardButtons[n] = nil
+      end
+      for n = 1, #STARTING_DECK do
+        local cardId = STARTING_DECK[n]
+        local cardDef = CARD_DEFS[cardId]
+        local btn = ui.deckCardButtons[n] or {}
+        ui.deckCardButtons[n] = btn
+        btn.x = listX
+        btn.y = listY + (n - 1) * (cardH + cardGap)
+        btn.w = cardW
+        btn.h = cardH
+        local hovered = pointInRect(mouseX, mouseY, btn)
+        setColorScaled(swatch.darkest, 1, hovered and 0.98 or 0.9)
+        love.graphics.rectangle("fill", btn.x, btn.y, btn.w, btn.h)
+        setColorScaled(swatch.brightest, 1, hovered and 1 or 0.7)
+        love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h)
+        setColorScaled(palette.text, 1, 0.95)
+        drawText(tostring(cardDef.cost) .. " energy", btn.x + math.floor(8 * uiScale), btn.y + math.floor(4 * uiScale))
+        drawText(cardDef.name, btn.x + math.floor(8 * uiScale), btn.y + lineH + math.floor(8 * uiScale))
+        drawText(cardDef.line, btn.x + math.floor(8 * uiScale), btn.y + lineH * 2 + math.floor(12 * uiScale))
+        if hovered then
+          hoveredTooltipBtn = btn
+          hoveredTooltipLines = {
+            {pre = cardDef.tooltip, hi = "", post = ""},
+            {pre = "cost ", hi = tostring(cardDef.cost), post = " energy"},
+            cardDef.rpm and {pre = "sets speed to ", hi = tostring(cardDef.rpm) .. " rpm", post = ""} or {pre = "effect ", hi = "+1 rpm", post = " to all orbiters"},
+          }
+        end
+      end
+    else
+      setColorScaled(palette.text, 1, 0.55)
+      drawText("empty", colX + math.floor(10 * uiScale), colY + lineH + math.floor(18 * uiScale))
+    end
   end
-  return nil
+
+  drawHoverTooltip(hoveredTooltipLines, hoveredTooltipBtn, uiScale, lineH, false)
 end
 
 function getOrbiterTooltipLayout()
@@ -1920,9 +1817,7 @@ function getOrbiterTooltipLayout()
   local font = getUiScreenFont()
   local uiScale = scale >= 1 and scale or 1
   local totalBoost = orbiter.boost + speedWaveBoostFor(orbiter)
-  local stabilityMultiplier = blackHoleStabilitySpeedMultiplier()
   local boostPercent = math.floor(totalBoost * 100 + 0.5)
-  local stabilityPercent = math.floor((stabilityMultiplier - 1) * 100 + 0.5)
   local title = "selected moon"
   if orbiter.kind == "satellite" or orbiter.kind == "moon-satellite" then
     title = "selected satellite"
@@ -1932,14 +1827,10 @@ function getOrbiterTooltipLayout()
     title = "selected mega planet"
   end
 
-  local baseRpm = orbiter.speed * RAD_PER_SECOND_TO_RPM
-  local currentRpm = orbiter.speed * (1 + totalBoost) * stabilityMultiplier * RAD_PER_SECOND_TO_RPM
+  local currentRpm = orbiter.speed * (1 + totalBoost) * RAD_PER_SECOND_TO_RPM
   local detailLines = {
-    {pre = "revolutions ", hi = tostring(orbiter.revolutions), post = ""},
     {pre = "orbit radius ", hi = string.format("%.0f px", orbiter.radius), post = ""},
-    {pre = "base speed ", hi = string.format("%.2f rpm", baseRpm), post = ""},
     {pre = "current speed ", hi = string.format("%.2f rpm", currentRpm), post = ""},
-    {pre = "stability mod ", hi = string.format("%+d%%", stabilityPercent), post = ""},
     {pre = "active boost ", hi = string.format("%+d%%", boostPercent), post = ""},
   }
 
@@ -1999,15 +1890,10 @@ function getOrbiterTooltipLayout()
     boxH = boxH,
     anchorWorldX = anchorWorldX,
     anchorWorldY = anchorWorldY,
-    action = getOrbiterAction(orbiter),
   }
 end
 
 function drawOrbiterTooltipConnector(frontPass)
-  ui.orbiterActionBtn.visible = false
-  ui.orbiterActionBtn.enabled = false
-  ui.orbiterActionBtn.action = nil
-
   local layout = getOrbiterTooltipLayout()
   if not layout then
     return
@@ -2026,10 +1912,6 @@ function drawOrbiterTooltipConnector(frontPass)
 end
 
 function drawOrbiterTooltip()
-  ui.orbiterActionBtn.visible = false
-  ui.orbiterActionBtn.enabled = false
-  ui.orbiterActionBtn.action = nil
-
   local layout = getOrbiterTooltipLayout()
   if not layout then
     return
@@ -2060,65 +1942,6 @@ function drawOrbiterTooltip()
     y = y + layout.lineH + layout.lineGap
   end
 
-  local action = layout.action
-  if not action then
-    return
-  end
-
-  local btnW = layout.boxW
-  local btnH = layout.lineH + math.floor(6 * layout.uiScale)
-  local btnX = layout.boxX
-  local btnY = layout.boxY + layout.boxH + math.floor(3 * layout.uiScale)
-  local btn = ui.orbiterActionBtn
-  btn.x = btnX
-  btn.y = btnY
-  btn.w = btnW
-  btn.h = btnH
-  btn.visible = true
-  btn.enabled = action.enabled
-  btn.action = action.action
-
-  local btnAlpha = action.enabled and 1 or 0.45
-  local mouseX, mouseY = love.mouse.getPosition()
-  local hovered = pointInRect(mouseX, mouseY, btn)
-  if hovered then
-    setColorScaled(swatch.brightest, 1, 0.95 * btnAlpha)
-    love.graphics.rectangle("line", btnX, btnY, btnW, btnH)
-  end
-  local textY = btnY + math.floor(3 * layout.uiScale)
-  setColorScaled(palette.text, 1, btnAlpha)
-  drawText(action.label, btnX + math.floor(8 * layout.uiScale), textY)
-  local priceW = font:getWidth(action.price)
-  local priceX = btnX + btnW - priceW - math.floor(8 * layout.uiScale)
-  if action.priceStyle == "rainbow-fast" then
-    local pulse = 0.5 + 0.5 * math.sin((state.time / 1.2) * TWO_PI)
-    local blend = smoothstep(pulse)
-    local r = lerp(swatch.bright[1], swatch.mid[1], blend)
-    local g = lerp(swatch.bright[2], swatch.mid[2], blend)
-    local b = lerp(swatch.bright[3], swatch.mid[3], blend)
-    setColorDirect(r, g, b, btnAlpha)
-    drawText(action.price, priceX, textY)
-  else
-    setColorScaled(palette.text, 1, btnAlpha)
-    drawText(action.price, priceX, textY)
-  end
-
-  if hovered then
-    drawHoverTooltip(action.tooltipLines, btn, layout.uiScale, layout.lineH, true)
-  end
-end
-
-local function drawSpeedWaveText()
-  local popup = state.speedWaveText
-  if not popup then
-    return
-  end
-  local t = clamp(popup.age / popup.life, 0, 1)
-  local alpha = 1 - smoothstep(t)
-  local uiScale = scale >= 1 and scale or 1
-  local yLift = t * 12 * uiScale
-  setColorDirect(swatch.brightest[1], swatch.brightest[2], swatch.brightest[3], alpha)
-  drawText("speed wave", popup.x + 8 * uiScale, popup.y - 10 * uiScale - yLift)
 end
 
 local function initSphereShader()
@@ -2382,7 +2205,7 @@ local function playClickFx(isClosing)
   love.audio.play(voice)
 end
 
-local function playMenuBuyClickFx()
+playMenuBuyClickFx = function()
   if not clickFx then
     return
   end
@@ -2428,6 +2251,7 @@ function love.load()
   initUpgradeFx()
   initClickFx()
   initGameSystems()
+  openMainMenu()
 
   recomputeViewport()
 
@@ -2447,7 +2271,11 @@ function love.resize()
 end
 
 function love.keypressed(key)
-  if key == "b" then
+  if key == "escape" then
+    if state.screen == "deck_menu" or state.screen == "run" then
+      openMainMenu()
+    end
+  elseif key == "b" then
     setBorderlessFullscreen(not state.borderlessFullscreen)
   elseif key == "l" then
     toggleSphereShadeStyle()
@@ -2464,17 +2292,20 @@ function love.update(dt)
   updateUpgradeFx(dt)
   state.time = state.time + dt
   state.planetBounceTime = math.max(0, state.planetBounceTime - dt)
+  state.rpmRollTimer = math.max(0, state.rpmRollTimer - dt)
 
-  if runtime.upgrades then
-    runtime.upgrades:update(dt)
-  end
   if runtime.orbiters then
     runtime.orbiters:update(dt)
   end
-  if runtime.progression then
-    runtime.progression:update()
+
+  local ripples = state.speedWaveRipples
+  for i = #ripples, 1, -1 do
+    local ripple = ripples[i]
+    ripple.age = ripple.age + dt
+    if ripple.age >= ripple.life then
+      table.remove(ripples, i)
+    end
   end
-  updateOrbitGainFx(dt)
 end
 
 function love.mousepressed(x, y, button)
@@ -2482,61 +2313,41 @@ function love.mousepressed(x, y, button)
     return
   end
 
-  if x >= ui.buyMegaPlanetBtn.x and x <= ui.buyMegaPlanetBtn.x + ui.buyMegaPlanetBtn.w and y >= ui.buyMegaPlanetBtn.y and y <= ui.buyMegaPlanetBtn.y + ui.buyMegaPlanetBtn.h then
-    if addMegaPlanet() then
-      playMenuBuyClickFx()
+  if state.screen == "main_menu" then
+    if pointInRect(x, y, ui.mainPlayBtn) then
+      startRunFromMenu()
+      playClickFx(false)
+      return
+    end
+    if pointInRect(x, y, ui.mainDeckBtn) then
+      openDeckMenu()
+      playClickFx(false)
+      return
     end
     return
-  end
-
-  if x >= ui.buyPlanetBtn.x and x <= ui.buyPlanetBtn.x + ui.buyPlanetBtn.w and y >= ui.buyPlanetBtn.y and y <= ui.buyPlanetBtn.y + ui.buyPlanetBtn.h then
-    if addPlanet() then
-      playMenuBuyClickFx()
+  elseif state.screen == "deck_menu" then
+    if pointInRect(x, y, ui.menuBackBtn) then
+      openMainMenu()
+      playClickFx(true)
     end
     return
+  elseif state.screen ~= "run" then
+    return
   end
 
-  if x >= ui.buyMoonBtn.x and x <= ui.buyMoonBtn.x + ui.buyMoonBtn.w and y >= ui.buyMoonBtn.y and y <= ui.buyMoonBtn.y + ui.buyMoonBtn.h then
-    if addMoon() then
-      playMenuBuyClickFx()
+  if pointInRect(x, y, ui.endTurnBtn) and not state.runComplete then
+    endPlayerTurn()
+    return
+  end
+
+  for i = 1, #ui.cardButtons do
+    local btn = ui.cardButtons[i]
+    if btn and pointInRect(x, y, btn) then
+      playCard(btn.index)
+      return
     end
-    return
   end
-
-  if x >= ui.buySatelliteBtn.x and x <= ui.buySatelliteBtn.x + ui.buySatelliteBtn.w and y >= ui.buySatelliteBtn.y and y <= ui.buySatelliteBtn.y + ui.buySatelliteBtn.h then
-    if addSatellite() then
-      playMenuBuyClickFx()
-    end
-    return
-  end
-
-  if x >= ui.speedWaveBtn.x and x <= ui.speedWaveBtn.x + ui.speedWaveBtn.w and y >= ui.speedWaveBtn.y and y <= ui.speedWaveBtn.y + ui.speedWaveBtn.h then
-    buySpeedWave()
-    return
-  end
-
-  if x >= ui.speedClickBtn.x and x <= ui.speedClickBtn.x + ui.speedClickBtn.w and y >= ui.speedClickBtn.y and y <= ui.speedClickBtn.y + ui.speedClickBtn.h then
-    buySpeedClick()
-    return
-  end
-
-  if x >= ui.blackHoleShaderBtn.x and x <= ui.blackHoleShaderBtn.x + ui.blackHoleShaderBtn.w and y >= ui.blackHoleShaderBtn.y and y <= ui.blackHoleShaderBtn.y + ui.blackHoleShaderBtn.h then
-    buyBlackHoleShader()
-    return
-  end
-
-  if ui.orbiterActionBtn.visible and x >= ui.orbiterActionBtn.x and x <= ui.orbiterActionBtn.x + ui.orbiterActionBtn.w and y >= ui.orbiterActionBtn.y and y <= ui.orbiterActionBtn.y + ui.orbiterActionBtn.h then
-    if ui.orbiterActionBtn.enabled then
-      local bought = false
-      if ui.orbiterActionBtn.action == "buy-moon" then
-        bought = addMoon(state.selectedOrbiter)
-      elseif ui.orbiterActionBtn.action == "buy-satellite" then
-        bought = addSatelliteToMoon(state.selectedOrbiter)
-      end
-      if bought then
-        playMenuBuyClickFx()
-      end
-    end
+  if pointInRect(x, y, ui.drawPile) or pointInRect(x, y, ui.discardPile) then
     return
   end
 
@@ -2631,24 +2442,16 @@ function love.draw()
   drawLightSource(true)
   love.graphics.pop()
 
-  drawOrbitGainFx()
-
   love.graphics.setCanvas()
   love.graphics.clear(palette.space)
   love.graphics.setColor(1, 1, 1, 1)
   local rippleActive, waveCenterR, waveHalfWidth, waveRadialStrength, waveSwirlStrength = activeSpeedWaveRippleParams()
-  if gravityWellShader and (state.blackHoleShaderUnlocked or rippleActive) then
+  if gravityWellShader then
     local coreR = clamp((state.planetVisualRadius or BODY_VISUAL.planetRadius) / GAME_H, 0.002, 0.45)
-    local innerR = coreR
-    local outerR = coreR
-    local radialStrength = 0
-    local swirlStrength = 0
-    if state.blackHoleShaderUnlocked then
-      innerR = clamp(coreR * GRAVITY_WELL_INNER_SCALE, 0.001, coreR - 0.0005)
-      outerR = clamp(coreR * GRAVITY_WELL_RADIUS_SCALE, coreR + 0.01, 0.95)
-      radialStrength = GRAVITY_WELL_RADIAL_STRENGTH
-      swirlStrength = GRAVITY_WELL_SWIRL_STRENGTH
-    end
+    local innerR = clamp(coreR * GRAVITY_WELL_INNER_SCALE, 0.001, coreR - 0.0005)
+    local outerR = clamp(coreR * GRAVITY_WELL_RADIUS_SCALE, coreR + 0.01, 0.95)
+    local radialStrength = GRAVITY_WELL_RADIAL_STRENGTH
+    local swirlStrength = GRAVITY_WELL_SWIRL_STRENGTH
     local prevShader = love.graphics.getShader()
     love.graphics.setShader(gravityWellShader)
     gravityWellShader:send("centerUv", {cx / GAME_W, cy / GAME_H})
@@ -2669,7 +2472,12 @@ function love.draw()
   end
 
   love.graphics.setFont(getUiScreenFont())
-  drawSpeedWaveText()
-  drawOrbiterTooltip()
-  drawHud()
+  if state.screen == "run" then
+    drawOrbiterTooltip()
+    drawHud()
+  elseif state.screen == "main_menu" then
+    drawMainMenu()
+  elseif state.screen == "deck_menu" then
+    drawDeckMenu()
+  end
 end

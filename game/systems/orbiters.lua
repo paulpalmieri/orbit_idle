@@ -51,6 +51,7 @@ function OrbiterSystem.new(opts)
     getTransientBoost = opts.getTransientBoost,
     onOrbitGainFx = opts.onOrbitGainFx,
     onOrbitsEarned = opts.onOrbitsEarned,
+    disableOrbitRewards = opts.disableOrbitRewards == true,
   }
 
   self.state.orbitGainCarry = tonumber(self.state.orbitGainCarry) or 0
@@ -102,6 +103,10 @@ end
 
 function OrbiterSystem:_notifyOrbitGain(orbiter, turnsGained, fxRadius)
   if turnsGained <= 0 then
+    return
+  end
+
+  if self.disableOrbitRewards then
     return
   end
 
