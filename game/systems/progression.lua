@@ -13,15 +13,6 @@ local DEFAULT_SKILL_TREE = {
       planet_click_impulse_boost = {mul = 1.08},
     },
   },
-  satellite_specialist_1 = {
-    branch = "satellite",
-    cost = 1,
-    requires = nil,
-    modifiers = {
-      speed_satellite = {mul = 1.06},
-      speed_moon_satellite = {mul = 1.06},
-    },
-  },
   moon_specialist_1 = {
     branch = "moon",
     cost = 1,
@@ -40,13 +31,6 @@ local DEFAULT_PERKS = {
     threshold = 3,
     modifiers = {
       speed_moon = {mul = 1.05},
-    },
-  },
-  moon_cluster_2 = {
-    enabled = false,
-    threshold = 5,
-    modifiers = {
-      speed_moon_satellite = {mul = 1.08},
     },
   },
 }

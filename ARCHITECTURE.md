@@ -1,13 +1,14 @@
 # Orbit Idle Architecture
 
-This refactor keeps gameplay behavior while moving progression/economy/simulation into explicit systems.
+This prototype is structured around a timing/stability core loop, with simulation and content separated from rendering.
 
 ## System Layout
 
 - `main.lua`
   - Owns rendering, input routing, and Love2D lifecycle hooks.
   - Initializes runtime services in `initGameSystems()`.
-  - Delegates simulation (`update`) and purchases to services.
+  - Delegates simulation (`update`) and purchases to systems.
+  - Applies always-on black-hole gravity well post-processing.
 
 - `game/systems/modifiers.lua`
   - Central stat-modifier registry.
@@ -23,15 +24,29 @@ This refactor keeps gameplay behavior while moving progression/economy/simulatio
   - Costs are stat-driven via modifier keys: `cost_<id>`.
 
 - `game/systems/orbiters.lua`
-  - Owns orbiter creation, impulse boosts, and orbit simulation.
+  - Owns orbiter creation and orbit simulation.
   - Emits orbit rewards and FX callbacks.
   - Applies speed multipliers from modifier keys:
     - `speed_global`
-    - `speed_<kind>` (`speed_satellite`, `speed_moon`, etc.)
+    - `speed_<kind>` (`speed_moon`, etc.)
 
-- `game/systems/upgrades.lua`
-  - Owns speed wave / speed click / black hole upgrade behavior.
-  - Owns stability mechanics and ripple/text timers.
+- `game/config/gameplay.lua`
+  - Central gameplay and simulation constants (`WORLD`, `GAMEPLAY`, `SLICE`, economy, audio, visuals).
+  - Reduces `main.lua` local-variable pressure by moving large static tables out of the root chunk.
+
+- `game/content/progression_content.lua`
+  - Owns skill-tree node definitions, objective definitions/order, and skill links.
+  - Builds tooltip content from upgrade-effect values.
+
+- `game/config/assets.lua`
+  - Central asset path registry.
+  - Keeps path changes isolated from gameplay logic.
+
+## Assets
+
+- Audio and font assets are organized under:
+  - `assets/audio`
+  - `assets/fonts`
 
 ## Runtime Wiring
 
@@ -40,14 +55,12 @@ This refactor keeps gameplay behavior while moving progression/economy/simulatio
 - `runtime.modifiers`
 - `runtime.economy`
 - `runtime.progression`
-- `runtime.upgrades`
 - `runtime.orbiters`
 
 Update order each frame:
 
-1. `runtime.upgrades:update(dt)`
-2. `runtime.orbiters:update(dt)`
-3. `runtime.progression:update()`
+1. `runtime.orbiters:update(dt)`
+2. `runtime.progression:update()`
 
 This keeps visual/UI code stable while gameplay logic lives in systems.
 
@@ -60,16 +73,11 @@ This keeps visual/UI code stable while gameplay logic lives in systems.
 
 Examples:
 
-- Click specialization:
-  - `planet_click_impulse_boost`
-- Satellite specialization:
-  - `speed_satellite`
-  - `speed_moon_satellite`
 - Moon perks:
   - `speed_moon`
-  - `cost_moonSatellite`
 
 ## Behavior Preservation Notes
 
-- Existing orbit generation, UI interactions, and rendering are preserved.
-- Current perks are scaffolded and disabled by default in progression definitions.
+- Existing orbit generation and timing/stability gameplay are preserved.
+- Legacy visible light-source selection was removed (lighting remains via an invisible fixed light anchor).
+- Gravity well visual distortion is now permanent and no longer upgrade-gated.

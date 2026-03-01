@@ -3,13 +3,6 @@ EconomySystem.__index = EconomySystem
 
 local DEFAULT_COSTS = {
   moon = 50,
-  planet = 1000,
-  megaPlanet = 5000,
-  satellite = 5,
-  moonSatellite = 10,
-  speedWave = 25,
-  speedClick = 15,
-  blackHoleShader = 100,
 }
 
 local function roundCost(value)

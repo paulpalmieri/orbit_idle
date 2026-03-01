@@ -5,10 +5,6 @@ local function normalizeKindForStat(kind)
   return (kind or ""):gsub("-", "_")
 end
 
-local function createEmptyBoostTable()
-  return {}
-end
-
 local function newOrbiterFromOrbital(orbital, kind)
   return {
     angle = orbital.angle,
@@ -19,7 +15,7 @@ local function newOrbiterFromOrbital(orbital, kind)
     plane = orbital.plane,
     speed = orbital.speed,
     boost = 0,
-    boostDurations = createEmptyBoostTable(),
+    boostDurations = {},
     x = 0,
     y = 0,
     z = 0,
@@ -39,16 +35,10 @@ function OrbiterSystem.new(opts)
     bodyVisual = assert(opts.bodyVisual, "OrbiterSystem requires bodyVisual"),
     twoPi = assert(opts.twoPi, "OrbiterSystem requires twoPi"),
     maxMoons = assert(opts.maxMoons, "OrbiterSystem requires maxMoons"),
-    maxSatellites = assert(opts.maxSatellites, "OrbiterSystem requires maxSatellites"),
-    impulseDuration = assert(opts.impulseDuration, "OrbiterSystem requires impulseDuration"),
-    impulseTargetBoost = assert(opts.impulseTargetBoost, "OrbiterSystem requires impulseTargetBoost"),
-    impulseRiseRate = assert(opts.impulseRiseRate, "OrbiterSystem requires impulseRiseRate"),
-    impulseFallRate = assert(opts.impulseFallRate, "OrbiterSystem requires impulseFallRate"),
     createOrbitalParams = assert(opts.createOrbitalParams, "OrbiterSystem requires createOrbitalParams"),
     updateOrbiterPosition = assert(opts.updateOrbiterPosition, "OrbiterSystem requires updateOrbiterPosition"),
     assignRenderOrder = assert(opts.assignRenderOrder, "OrbiterSystem requires assignRenderOrder"),
-    getStabilitySpeedMultiplier = assert(opts.getStabilitySpeedMultiplier, "OrbiterSystem requires getStabilitySpeedMultiplier"),
-    getTransientBoost = opts.getTransientBoost,
+    getStabilitySpeedMultiplier = opts.getStabilitySpeedMultiplier,
     onOrbitGainFx = opts.onOrbitGainFx,
     onOrbitsEarned = opts.onOrbitsEarned,
   }
@@ -79,44 +69,6 @@ function OrbiterSystem:getOrbitGainReward(turnsGained)
   return payout
 end
 
-function OrbiterSystem:updateOrbiterBoost(orbiter, dt)
-  local durations = orbiter.boostDurations or createEmptyBoostTable()
-  for i = #durations, 1, -1 do
-    local entry = durations[i]
-    local remaining
-    if type(entry) == "table" then
-      remaining = (tonumber(entry.duration) or 0) - dt
-      entry.duration = remaining
-      durations[i] = entry
-    else
-      remaining = (tonumber(entry) or 0) - dt
-      durations[i] = remaining
-    end
-    if remaining <= 0 then
-      table.remove(durations, i)
-    end
-  end
-  orbiter.boostDurations = durations
-
-  local activeStacks = #durations
-  local targetBoost = 0
-  for i = 1, activeStacks do
-    local entry = durations[i]
-    if type(entry) == "table" then
-      targetBoost = targetBoost + (tonumber(entry.amount) or self.impulseTargetBoost)
-    else
-      targetBoost = targetBoost + self.impulseTargetBoost
-    end
-  end
-  local blendRate = targetBoost > 0 and self.impulseRiseRate or self.impulseFallRate
-  local blend = math.min(1, dt * blendRate)
-  orbiter.boost = orbiter.boost + (targetBoost - orbiter.boost) * blend
-
-  if targetBoost <= 0 and orbiter.boost < 0.001 then
-    orbiter.boost = 0
-  end
-end
-
 function OrbiterSystem:_notifyOrbitGain(orbiter, turnsGained, fxRadius)
   if turnsGained <= 0 then
     return
@@ -138,17 +90,13 @@ end
 
 function OrbiterSystem:_advanceOrbiter(orbiter, dt, fxRadius)
   local prevAngle = orbiter.angle
-  self:updateOrbiterBoost(orbiter, dt)
-
-  local transientBoost = 0
-  if self.getTransientBoost then
-    transientBoost = self.getTransientBoost(orbiter) or 0
+  local kindSpeedMul = self:getSpeedMultiplierForKind(orbiter.kind)
+  local stabilityMul = 1
+  if self.getStabilitySpeedMultiplier then
+    stabilityMul = self.getStabilitySpeedMultiplier() or 1
   end
 
-  local totalBoost = orbiter.boost + transientBoost
-  local kindSpeedMul = self:getSpeedMultiplierForKind(orbiter.kind)
-  local stabilityMul = self.getStabilitySpeedMultiplier()
-  local effectiveSpeed = orbiter.speed * kindSpeedMul * (1 + totalBoost) * stabilityMul
+  local effectiveSpeed = orbiter.speed * kindSpeedMul * stabilityMul
   orbiter.angle = orbiter.angle + effectiveSpeed * dt
 
   local prevTurns = math.floor(prevAngle / self.twoPi)
@@ -170,32 +118,8 @@ function OrbiterSystem:_addOrbiter(list, config, kind)
   return orbiter
 end
 
-function OrbiterSystem:addMegaPlanet()
-  local bought = self.economy:trySpendCost("megaPlanet")
-  if not bought then
-    return false
-  end
-
-  self:_addOrbiter(self.state.megaPlanets, self.orbitConfigs.megaPlanet, "mega-planet")
-  return true
-end
-
-function OrbiterSystem:addPlanet()
-  local bought = self.economy:trySpendCost("planet")
-  if not bought then
-    return false
-  end
-
-  self:_addOrbiter(self.state.planets, self.orbitConfigs.planet, "planet")
-  return true
-end
-
 function OrbiterSystem:addMoon(parentOrbiter)
   if #self.state.moons >= self.maxMoons then
-    return false
-  end
-
-  if parentOrbiter and parentOrbiter.kind ~= "planet" and parentOrbiter.kind ~= "mega-planet" then
     return false
   end
 
@@ -214,127 +138,9 @@ function OrbiterSystem:addMoon(parentOrbiter)
   return true
 end
 
-function OrbiterSystem:addSatellite()
-  if #self.state.satellites >= self.maxSatellites then
-    return false
-  end
-
-  local bought = self.economy:trySpendCost("satellite")
-  if not bought then
-    return false
-  end
-
-  self:_addOrbiter(self.state.satellites, self.orbitConfigs.satellite, "satellite")
-  return true
-end
-
-function OrbiterSystem:addSatelliteToMoon(moon)
-  if not moon or moon.kind ~= "moon" then
-    return false
-  end
-
-  local bought = self.economy:trySpendCost("moonSatellite")
-  if not bought then
-    return false
-  end
-
-  moon.childSatellites = moon.childSatellites or {}
-  local orbital = self.createOrbitalParams(self.orbitConfigs.moonChildSatellite, #moon.childSatellites)
-  local child = newOrbiterFromOrbital(orbital, "moon-satellite")
-  child.parentOrbiter = moon
-  child.parentMoon = moon
-  child.x = moon.x
-  child.y = moon.y
-  self.updateOrbiterPosition(child)
-  self.assignRenderOrder(child)
-  moon.childSatellites[#moon.childSatellites + 1] = child
-  return true
-end
-
-function OrbiterSystem:pickImpulseTarget()
-  local pool = {}
-
-  for _, megaPlanet in ipairs(self.state.megaPlanets) do
-    pool[#pool + 1] = megaPlanet
-  end
-  for _, planet in ipairs(self.state.planets) do
-    pool[#pool + 1] = planet
-  end
-  for _, moon in ipairs(self.state.moons) do
-    pool[#pool + 1] = moon
-    local childSatellites = moon.childSatellites or {}
-    for _, child in ipairs(childSatellites) do
-      pool[#pool + 1] = child
-    end
-  end
-  for _, satellite in ipairs(self.state.satellites) do
-    pool[#pool + 1] = satellite
-  end
-
-  if #pool == 0 then
-    return nil
-  end
-
-  return pool[love.math.random(1, #pool)]
-end
-
-function OrbiterSystem:triggerPlanetImpulse()
-  local target = self:pickImpulseTarget()
-  if not target then
-    return false
-  end
-
-  return self:injectBoost(target, self.impulseDuration)
-end
-
-function OrbiterSystem:injectBoost(orbiter, duration, amount)
-  if not orbiter then
-    return false
-  end
-
-  local boostDuration = math.max(0, tonumber(duration) or 0)
-  if boostDuration <= 0 then
-    return false
-  end
-
-  orbiter.boostDurations = orbiter.boostDurations or createEmptyBoostTable()
-  local boostAmount = tonumber(amount)
-  if boostAmount == nil then
-    orbiter.boostDurations[#orbiter.boostDurations + 1] = boostDuration
-  else
-    if boostAmount <= 0 then
-      return false
-    end
-    orbiter.boostDurations[#orbiter.boostDurations + 1] = {
-      duration = boostDuration,
-      amount = boostAmount,
-    }
-  end
-  return true
-end
-
 function OrbiterSystem:update(dt)
-  for _, megaPlanet in ipairs(self.state.megaPlanets) do
-    self:_advanceOrbiter(megaPlanet, dt, self.bodyVisual.megaPlanetRadius)
-  end
-
-  for _, planet in ipairs(self.state.planets) do
-    self:_advanceOrbiter(planet, dt, self.bodyVisual.orbitPlanetRadius)
-  end
-
   for _, moon in ipairs(self.state.moons) do
     self:_advanceOrbiter(moon, dt, self.bodyVisual.moonRadius)
-
-    local children = moon.childSatellites or {}
-    for _, child in ipairs(children) do
-      child.parentOrbiter = moon
-      child.parentMoon = moon
-      self:_advanceOrbiter(child, dt, self.bodyVisual.moonChildSatelliteRadius)
-    end
-  end
-
-  for _, satellite in ipairs(self.state.satellites) do
-    self:_advanceOrbiter(satellite, dt, self.bodyVisual.satelliteRadius)
   end
 end
 
