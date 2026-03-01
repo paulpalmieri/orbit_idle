@@ -12,6 +12,8 @@ local uiScreenFont
 local uiScreenFontSize = 0
 local rpmDisplayFont
 local rpmDisplayFontSize = 0
+local cardFont
+local cardFontSize = 0
 local bgMusic
 local bgMusicFirstPass = false
 local bgMusicPrevPos = 0
@@ -495,6 +497,19 @@ function getRpmDisplayFont()
     rpmDisplayFontSize = size
   end
   return rpmDisplayFont
+end
+
+local function getCardFont(cardHeight)
+  local uiScale = scale >= 1 and scale or 1
+  local uiSize = math.max(1, math.floor(Config.UI_FONT_SIZE * uiScale + 0.5))
+  local fitSize = clamp(math.floor(cardHeight * 0.16 + 0.5), 10, 48)
+  local size = math.min(uiSize, fitSize)
+  if not cardFont or cardFontSize ~= size then
+    cardFont = love.graphics.newFont("font_gothic.ttf", size, "mono")
+    cardFont:setFilter("nearest", "nearest")
+    cardFontSize = size
+  end
+  return cardFont
 end
 
 local updateOrbiterPosition
@@ -1191,6 +1206,345 @@ function drawHoverTooltip(lines, anchorBtn, uiScale, lineH, preferLeft)
   end
 end
 
+local function getRunMoonBodyCount()
+  if runtime.cardRun and runtime.cardRun.countMoonBodies then
+    return runtime.cardRun:countMoonBodies()
+  end
+  return 0
+end
+
+local function previewMoonRpmBonus(cardDef)
+  if not cardDef or not cardDef.isMoonCard then
+    return 0
+  end
+  if (state.nextMoonCostReduction or 0) <= 0 then
+    return 0
+  end
+  return state.nextMoonRpmBonus or 0
+end
+
+local function computeCardRpmGain(cardDef, moonCount, moonBonus)
+  if not cardDef then
+    return 0
+  end
+  local id = cardDef.id
+  local moons = math.max(0, math.floor(moonCount or 0))
+  local bonus = math.max(0, math.floor(moonBonus or 0))
+  if id == "moonseed" then
+    return 4 + bonus
+  elseif id == "spin_up" then
+    return moons
+  elseif id == "overclock" then
+    return moons * 2
+  elseif id == "heavy_moon" then
+    return 6 + bonus
+  elseif id == "twin_seed" then
+    return 6 + bonus * 2
+  elseif id == "precision_spin" then
+    return moons * 2
+  elseif id == "redline" then
+    return moons * 4
+  elseif id == "resonant_burst" then
+    return moons * 2
+  elseif id == "anchor" then
+    return 2
+  end
+  return 0
+end
+
+local function getCardDescriptionParts(cardDef, moonCount, moonBonus, rpmGain)
+  if not cardDef then
+    return "", "", ""
+  end
+  local id = cardDef.id
+  if id == "moonseed" then
+    return "summon moon ", "+" .. tostring(4 + moonBonus) .. " rpm", ""
+  elseif id == "coolant_vent" then
+    return "vent ", "2 heat", ""
+  elseif id == "spin_up" then
+    return "all moons permanently ", "+" .. tostring(rpmGain) .. " rpm", ""
+  elseif id == "overclock" then
+    return "this turn all moons ", "+" .. tostring(rpmGain) .. " rpm", ""
+  elseif id == "heavy_moon" then
+    return "summon heavy ", "+" .. tostring(6 + moonBonus) .. " rpm", ""
+  elseif id == "twin_seed" then
+    return "summon twin moons ", "+" .. tostring(6 + moonBonus * 2) .. " rpm", ""
+  elseif id == "precision_spin" then
+    return "all moons permanently ", "+" .. tostring(rpmGain) .. " rpm", ""
+  elseif id == "cold_sink" then
+    return "vent ", "4 heat", ""
+  elseif id == "redline" then
+    return "this turn all moons ", "+" .. tostring(rpmGain) .. " rpm", ""
+  elseif id == "containment" then
+    return "vent 2, next card ", "-1 heat", ""
+  elseif id == "compression" then
+    return "next moon gets ", "+2 rpm", ""
+  elseif id == "reactor_feed" then
+    return "gain ", "+1 energy", ""
+  elseif id == "resonant_burst" then
+    return "burst now ", "+" .. tostring(rpmGain) .. " rpm", ""
+  elseif id == "anchor" then
+    return "summon anchor ", "+2 rpm", ""
+  end
+  return "", cardDef.line or "", ""
+end
+
+local function trimTextToWidth(text, maxWidth, font)
+  local value = tostring(text or "")
+  if maxWidth <= 0 then
+    return ""
+  end
+  if font:getWidth(value) <= maxWidth then
+    return value
+  end
+  local suffix = "..."
+  local suffixW = font:getWidth(suffix)
+  if suffixW > maxWidth then
+    return ""
+  end
+  for i = #value, 1, -1 do
+    local candidate = value:sub(1, i) .. suffix
+    if font:getWidth(candidate) <= maxWidth then
+      return candidate
+    end
+  end
+  return ""
+end
+
+local function lineTokenWidth(tokens, font)
+  local width = 0
+  local spaceW = font:getWidth(" ")
+  for i = 1, #tokens do
+    if i > 1 then
+      width = width + spaceW
+    end
+    width = width + font:getWidth(tokens[i].text)
+  end
+  return width
+end
+
+local function buildWrappedCardDescriptionLines(pre, hi, post, maxWidth, maxLines, font)
+  local tokens = {}
+  local function appendWords(text, isHighlight)
+    for word in tostring(text or ""):gmatch("%S+") do
+      tokens[#tokens + 1] = {text = word, hi = isHighlight}
+    end
+  end
+
+  appendWords(pre, false)
+  appendWords(hi, true)
+  appendWords(post, false)
+
+  local lines = {}
+  local current = {}
+  local currentW = 0
+  local spaceW = font:getWidth(" ")
+  local tokenIndex = 1
+  local truncated = false
+
+  while tokenIndex <= #tokens do
+    local token = tokens[tokenIndex]
+    local tokenW = font:getWidth(token.text)
+    local prefixW = (#current > 0) and spaceW or 0
+    local projectedW = currentW + prefixW + tokenW
+
+    if #current > 0 and projectedW > maxWidth then
+      lines[#lines + 1] = current
+      if #lines >= maxLines then
+        truncated = true
+        break
+      end
+      current = {}
+      currentW = 0
+    else
+      current[#current + 1] = token
+      currentW = projectedW
+      tokenIndex = tokenIndex + 1
+    end
+  end
+
+  if not truncated and #current > 0 and #lines < maxLines then
+    lines[#lines + 1] = current
+  end
+
+  if #lines == 0 then
+    lines[1] = {}
+  end
+
+  if truncated then
+    local last = lines[#lines]
+    local ellipsis = "..."
+    local ellipsisW = font:getWidth(ellipsis)
+    while #last > 0 and (lineTokenWidth(last, font) + ellipsisW) > maxWidth do
+      table.remove(last)
+    end
+    if #last == 0 then
+      if ellipsisW <= maxWidth then
+        last[1] = {text = ellipsis, hi = false}
+      end
+    else
+      last[#last].text = last[#last].text .. ellipsis
+    end
+  end
+
+  return lines
+end
+
+local function drawCardDescriptionWrapped(pre, hi, post, x, y, maxWidth, maxLines, lineH, alpha)
+  local font = love.graphics.getFont()
+  local lines = buildWrappedCardDescriptionLines(pre, hi, post, maxWidth, maxLines, font)
+  local spaceW = font:getWidth(" ")
+
+  for lineIndex = 1, #lines do
+    local tokens = lines[lineIndex]
+    local cursorX = x
+    local lineY = y + (lineIndex - 1) * lineH
+    for tokenIndex = 1, #tokens do
+      local token = tokens[tokenIndex]
+      if tokenIndex > 1 then
+        cursorX = cursorX + spaceW
+      end
+      if token.hi then
+        setColorScaled(swatch.brightest, 1, 0.98 * alpha)
+      else
+        setColorScaled(palette.text, 1, 0.84 * alpha)
+      end
+      drawText(token.text, cursorX, lineY)
+      cursorX = cursorX + font:getWidth(token.text)
+    end
+  end
+end
+
+local function drawCardMoonIllustration(x, y, radius, alpha)
+  local r = math.max(2, radius)
+  if sphereShader and spherePixel then
+    local shadeStyle = activeSphereShadeStyle()
+    local prevShader = love.graphics.getShader()
+    love.graphics.setShader(sphereShader)
+    sphereShader:send("baseColor", {palette.moonFront[1], palette.moonFront[2], palette.moonFront[3]})
+    sphereShader:send("lightVec", {0.80, 0.30, 0.52})
+    sphereShader:send("lightPower", 0.94)
+    sphereShader:send("ambient", 0.24)
+    sphereShader:send("contrast", shadeStyle.contrast or 1.08)
+    sphereShader:send("darkFloor", clamp(shadeStyle.darkFloor or Config.BODY_SHADE_DARK_FLOOR_TONE, 0, 1))
+    sphereShader:send("toneSteps", shadeStyle.toneSteps or 0)
+    sphereShader:send("facetSides", shadeStyle.facetSides or 0)
+    sphereShader:send("ditherStrength", shadeStyle.ditherStrength or 0)
+    sphereShader:send("ditherScale", shadeStyle.ditherScale or 1)
+    love.graphics.setColor(1, 1, 1, clamp(alpha or 1, 0, 1))
+    love.graphics.draw(spherePixel, x - r, y - r, 0, r * 2, r * 2)
+    love.graphics.setShader(prevShader)
+  else
+    setColorScaled(swatch.brightest, 1, 0.94 * alpha)
+    love.graphics.circle("fill", x, y, r, 20)
+    setColorScaled(swatch.mid, 1, 0.86 * alpha)
+    love.graphics.circle("fill", x + r * 0.28, y - r * 0.08, r * 0.86, 20)
+    setColorScaled(swatch.dim, 1, 0.42 * alpha)
+    love.graphics.circle("fill", x - r * 0.34, y + r * 0.12, r * 0.16, 10)
+  end
+  setColorScaled(swatch.brightest, 1, 0.56 * alpha)
+  love.graphics.circle("line", x, y, r, 20)
+end
+
+local function drawCardFace(btn, cardDef, opts)
+  local hovered = opts and opts.hovered or false
+  local alpha = opts and (opts.alpha or 1) or 1
+  local cost = opts and opts.cost
+  if cost == nil then
+    cost = cardDef and cardDef.cost or 0
+  end
+  local moonCount = opts and opts.moonCount or 0
+  local moonBonus = opts and opts.moonBonus or 0
+  local footerText = opts and opts.footerText or ""
+
+  local x = btn.x
+  local y = btn.y
+  local w = btn.w
+  local h = btn.h
+  local pad = math.max(4, math.floor(math.min(w, h) * 0.08))
+  local innerW = math.max(1, w - pad * 2)
+
+  setColorScaled(swatch.darkest, 1, 0.95 * alpha)
+  love.graphics.rectangle("fill", x, y, w, h)
+  setColorScaled(swatch.brightest, 1, (hovered and 1 or 0.75) * alpha)
+  love.graphics.rectangle("line", x, y, w, h)
+
+  local previousFont = love.graphics.getFont()
+  local cardLocalFont = getCardFont(h)
+  love.graphics.setFont(cardLocalFont)
+  local lineH = cardLocalFont:getHeight()
+
+  local topY = y + pad - math.floor(lineH * 0.12)
+  setColorScaled(swatch.bright, 1, 0.98 * alpha)
+  drawText(tostring(cost), x + pad, topY)
+
+  local rpmGain = computeCardRpmGain(cardDef, moonCount, moonBonus)
+  local rpmText = (rpmGain >= 0 and "+" or "") .. tostring(rpmGain) .. " rpm"
+  setColorScaled(swatch.brightest, 1, 0.98 * alpha)
+  drawText(rpmText, x + w - pad - cardLocalFont:getWidth(rpmText), topY)
+
+  local moonRadius = math.max(6, math.floor(math.min(w * 0.22, h * 0.16)))
+  local moonX = x + math.floor(w * 0.5)
+  local moonY = y + math.floor(h * 0.40)
+  drawCardMoonIllustration(moonX, moonY, moonRadius, alpha)
+
+  local descriptionY = moonY + moonRadius + math.max(5, math.floor(h * 0.05))
+  local footerY = nil
+  if footerText ~= "" then
+    footerY = y + h - lineH - math.max(2, math.floor(h * 0.03))
+  end
+  local descriptionBottom = footerY and (footerY - math.max(3, math.floor(h * 0.03))) or (y + h - pad)
+  local maxDescriptionLines = math.max(1, math.floor((descriptionBottom - descriptionY) / math.max(1, lineH)))
+  local pre, hi, post = getCardDescriptionParts(cardDef, moonCount, moonBonus, rpmGain)
+  drawCardDescriptionWrapped(pre, hi, post, x + pad, descriptionY, innerW, maxDescriptionLines, lineH, alpha)
+
+  if footerText ~= "" then
+    setColorScaled(palette.text, 1, 0.76 * alpha)
+    local label = trimTextToWidth(footerText, innerW, cardLocalFont)
+    drawText(label, x + w - pad - cardLocalFont:getWidth(label), footerY)
+  end
+
+  love.graphics.setFont(previousFont)
+end
+
+local function expandCardEntries(entries)
+  local cards = {}
+  for i = 1, #entries do
+    local entry = entries[i]
+    local count = math.max(0, math.floor(entry.count or 0))
+    for _ = 1, count do
+      cards[#cards + 1] = entry.id
+    end
+  end
+  return cards
+end
+
+local function chooseCardGridLayout(totalCards, listW, listH, gap, minCardW, maxCols)
+  local columnsCap = math.max(1, maxCols or 6)
+  local minWidth = math.max(40, minCardW or 72)
+  local fallbackCols = 1
+  local fallbackW = math.floor(listW)
+  local fallbackH = math.floor(fallbackW * 1.42)
+
+  for cols = 1, columnsCap do
+    local cardW = math.floor((listW - gap * (cols - 1)) / cols)
+    if cardW < minWidth then
+      break
+    end
+    local cardH = math.floor(cardW * 1.42)
+    fallbackCols = cols
+    fallbackW = cardW
+    fallbackH = cardH
+    local rows = math.max(1, math.ceil(math.max(1, totalCards) / cols))
+    local neededH = rows * cardH + math.max(0, rows - 1) * gap
+    if neededH <= listH then
+      return cols, cardW, cardH
+    end
+  end
+
+  return fallbackCols, fallbackW, fallbackH
+end
+
 local function drawHud()
   local font = love.graphics.getFont()
   local uiScale = scale >= 1 and scale or 1
@@ -1298,6 +1652,7 @@ local function drawHud()
 
   local hoveredTooltipLines
   local hoveredTooltipBtn
+  local moonCount = getRunMoonBodyCount()
   for i = #ui.cardButtons, handCount + 1, -1 do
     ui.cardButtons[i] = nil
     state.cardHoverLift[i] = nil
@@ -1321,17 +1676,16 @@ local function drawHud()
     btn.y = cardY - hoverLift
     hovered = pointInRect(mouseX, mouseY, btn)
     local cardCost = currentCardCost(cardDef)
+    local moonBonus = previewMoonRpmBonus(cardDef)
     local playable = (not state.runComplete) and cardDef and (state.energy >= cardCost)
     local alpha = playable and 1 or 0.45
-    setColorScaled(swatch.darkest, 1, 0.92 * alpha)
-    love.graphics.rectangle("fill", btn.x, btn.y, btn.w, btn.h)
-    setColorScaled(swatch.brightest, 1, (hovered and 1 or 0.75) * alpha)
-    love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h)
-    setColorScaled(palette.text, 1, alpha)
-    local costText = cardDef and ("cost " .. tostring(cardCost)) or "cost ?"
-    drawText(costText, btn.x + math.floor(8 * uiScale), btn.y + math.floor(6 * uiScale))
-    drawText(cardDef and cardDef.name or cardId, btn.x + math.floor(8 * uiScale), btn.y + lineH + math.floor(12 * uiScale))
-    drawText(cardDef and cardDef.line or "", btn.x + math.floor(8 * uiScale), btn.y + lineH * 2 + math.floor(18 * uiScale))
+    drawCardFace(btn, cardDef, {
+      hovered = hovered,
+      alpha = alpha,
+      cost = cardCost,
+      moonCount = moonCount,
+      moonBonus = moonBonus,
+    })
     if hovered and cardDef then
       hoveredTooltipBtn = btn
       hoveredTooltipLines = {
@@ -1449,9 +1803,17 @@ function drawDeckMenu()
 
   local deckEntries = runtime.deckBuilder and runtime.deckBuilder:listDeckEntries() or {}
   local inventoryEntries = runtime.deckBuilder and runtime.deckBuilder:listInventoryEntries() or {}
+  local deckCounts = runtime.deckBuilder and runtime.deckBuilder:getDeckCounts() or {}
   local inventoryCounts = runtime.deckBuilder and runtime.deckBuilder:getInventoryCounts() or {}
+  local deckCards = expandCardEntries(deckEntries)
+  local inventoryCards = expandCardEntries(inventoryEntries)
+  local shopCards = {}
+  for n = 1, #Config.SHOP_CARD_ORDER do
+    shopCards[#shopCards + 1] = Config.SHOP_CARD_ORDER[n]
+  end
   local hoveredTooltipLines
   local hoveredTooltipBtn
+  local moonCount = getRunMoonBodyCount()
 
   for i = 1, 3 do
     local colX = contentX + (i - 1) * (colW + colGap)
@@ -1463,145 +1825,114 @@ function drawDeckMenu()
     setColorScaled(palette.text, 1, 0.95)
     drawText(headers[i], colX + math.floor(10 * uiScale), colY + math.floor(8 * uiScale))
 
-    if headers[i] == "deck" then
-      local listX = colX + math.floor(10 * uiScale)
-      local listY = colY + lineH + math.floor(18 * uiScale)
-      local cardW = colW - math.floor(20 * uiScale)
-      local cardH = lineH * 3 + math.floor(16 * uiScale)
-      local cardGap = math.floor(8 * uiScale)
-      for n = #ui.deckCardButtons, #deckEntries + 1, -1 do
-        ui.deckCardButtons[n] = nil
-      end
-      if #deckEntries == 0 then
-        setColorScaled(palette.text, 1, 0.55)
-        drawText("empty", colX + math.floor(10 * uiScale), colY + lineH + math.floor(18 * uiScale))
-      end
-      for n = 1, #deckEntries do
-        local entry = deckEntries[n]
-        local cardId = entry.id
-        local cardDef = Config.CARD_DEFS[cardId]
-        local copies = entry.count
-        local btn = ui.deckCardButtons[n] or {}
-        ui.deckCardButtons[n] = btn
-        btn.x = listX
-        btn.y = listY + (n - 1) * (cardH + cardGap)
-        btn.w = cardW
-        btn.h = cardH
-        btn.cardId = cardId
-        local removable = runtime.deckBuilder and runtime.deckBuilder:canRemoveFromDeck(cardId)
-        local hovered = pointInRect(mouseX, mouseY, btn)
-        local alpha = removable and 1 or 0.45
-        setColorScaled(swatch.darkest, 1, (hovered and 0.98 or 0.9) * alpha)
-        love.graphics.rectangle("fill", btn.x, btn.y, btn.w, btn.h)
-        setColorScaled(swatch.brightest, 1, (hovered and 1 or 0.7) * alpha)
-        love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h)
-        setColorScaled(palette.text, 1, 0.95 * alpha)
-        drawText("x" .. tostring(copies) .. "  cost " .. tostring(cardDef.cost), btn.x + math.floor(8 * uiScale), btn.y + math.floor(4 * uiScale))
-        drawText(cardDef.name, btn.x + math.floor(8 * uiScale), btn.y + lineH + math.floor(8 * uiScale))
-        drawText(cardDef.line, btn.x + math.floor(8 * uiScale), btn.y + lineH * 2 + math.floor(12 * uiScale))
-        if hovered then
-          local actionLine = removable and "remove" or ("min deck " .. tostring(minDeckSize))
-          hoveredTooltipBtn = btn
-          hoveredTooltipLines = {
-            {pre = cardDef.tooltip, hi = "", post = ""},
-            {pre = "cost ", hi = tostring(cardDef.cost), post = " energy"},
-            {pre = "deck copies ", hi = tostring(copies), post = ""},
-            {pre = "click ", hi = actionLine, post = removable and " to inventory" or ""},
-          }
-        end
-      end
-    elseif headers[i] == "inventory" then
-      local listX = colX + math.floor(10 * uiScale)
-      local listY = colY + lineH + math.floor(18 * uiScale)
-      local cardW = colW - math.floor(20 * uiScale)
-      local cardH = lineH * 3 + math.floor(16 * uiScale)
-      local cardGap = math.floor(8 * uiScale)
-      for n = #ui.deckInventoryButtons, #inventoryEntries + 1, -1 do
-        ui.deckInventoryButtons[n] = nil
-      end
-      if #inventoryEntries == 0 then
-        setColorScaled(palette.text, 1, 0.55)
-        drawText("empty", colX + math.floor(10 * uiScale), colY + lineH + math.floor(18 * uiScale))
-      end
-      for n = 1, #inventoryEntries do
-        local entry = inventoryEntries[n]
-        local cardId = entry.id
-        local cardDef = Config.CARD_DEFS[cardId]
-        local copies = entry.count
-        local btn = ui.deckInventoryButtons[n] or {}
-        ui.deckInventoryButtons[n] = btn
-        btn.x = listX
-        btn.y = listY + (n - 1) * (cardH + cardGap)
-        btn.w = cardW
-        btn.h = cardH
-        btn.cardId = cardId
-        local addable = runtime.deckBuilder and runtime.deckBuilder:canAddToDeck(cardId)
-        local hovered = pointInRect(mouseX, mouseY, btn)
-        local alpha = addable and 1 or 0.45
-        setColorScaled(swatch.darkest, 1, (hovered and 0.98 or 0.9) * alpha)
-        love.graphics.rectangle("fill", btn.x, btn.y, btn.w, btn.h)
-        setColorScaled(swatch.brightest, 1, (hovered and 1 or 0.7) * alpha)
-        love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h)
-        setColorScaled(palette.text, 1, 0.95 * alpha)
-        drawText("x" .. tostring(copies) .. "  cost " .. tostring(cardDef.cost), btn.x + math.floor(8 * uiScale), btn.y + math.floor(4 * uiScale))
-        drawText(cardDef.name, btn.x + math.floor(8 * uiScale), btn.y + lineH + math.floor(8 * uiScale))
-        drawText(cardDef.line, btn.x + math.floor(8 * uiScale), btn.y + lineH * 2 + math.floor(12 * uiScale))
-        if hovered then
-          local actionLine = addable and "add" or ("max deck " .. tostring(maxDeckSize))
-          hoveredTooltipBtn = btn
-          hoveredTooltipLines = {
-            {pre = cardDef.tooltip, hi = "", post = ""},
-            {pre = "cost ", hi = tostring(cardDef.cost), post = " energy"},
-            {pre = "inventory copies ", hi = tostring(copies), post = ""},
-            {pre = "click ", hi = actionLine, post = addable and " to deck" or ""},
-          }
-        end
-      end
-    elseif headers[i] == "shop" then
-      local rowX = colX + math.floor(10 * uiScale)
-      local rowY = colY + lineH + math.floor(12 * uiScale)
-      local rowW = colW - math.floor(20 * uiScale)
-      local rowH = lineH + math.floor(8 * uiScale)
-      local rowGap = math.floor(4 * uiScale)
-      for n = #ui.deckShopButtons, #Config.SHOP_CARD_ORDER + 1, -1 do
-        ui.deckShopButtons[n] = nil
-      end
-      for n = 1, #Config.SHOP_CARD_ORDER do
-        local cardId = Config.SHOP_CARD_ORDER[n]
-        local cardDef = Config.CARD_DEFS[cardId]
-        local btn = ui.deckShopButtons[n] or {}
-        ui.deckShopButtons[n] = btn
-        btn.x = rowX
-        btn.y = rowY + (n - 1) * (rowH + rowGap)
-        btn.w = rowW
-        btn.h = rowH
-        btn.cardId = cardId
-        local price = cardDef.shopPrice or 0
-        local affordable = currency >= price
-        local hovered = pointInRect(mouseX, mouseY, btn)
-        local alpha = affordable and 1 or 0.45
-        setColorScaled(swatch.darkest, 1, (hovered and 0.98 or 0.9) * alpha)
-        love.graphics.rectangle("fill", btn.x, btn.y, btn.w, btn.h)
-        setColorScaled(swatch.brightest, 1, (hovered and 1 or 0.7) * alpha)
-        love.graphics.rectangle("line", btn.x, btn.y, btn.w, btn.h)
-        setColorScaled(palette.text, 1, 0.95 * alpha)
-        drawText(cardDef.name, btn.x + math.floor(8 * uiScale), btn.y + math.floor(4 * uiScale))
-        local priceText = tostring(price)
-        drawText(priceText, btn.x + btn.w - font:getWidth(priceText) - math.floor(8 * uiScale), btn.y + math.floor(4 * uiScale))
-        if hovered then
-          hoveredTooltipBtn = btn
-          hoveredTooltipLines = {
-            {pre = cardDef.tooltip, hi = "", post = ""},
-            {pre = "cost ", hi = tostring(cardDef.cost), post = " energy"},
-            {pre = "shop ", hi = tostring(price), post = ""},
-            {pre = "owned ", hi = tostring(inventoryCounts[cardId] or 0), post = ""},
-            {pre = "click ", hi = "buy", post = ""},
-          }
-        end
-      end
-    else
+    local listPad = math.floor(8 * uiScale)
+    local listX = colX + listPad
+    local listY = colY + lineH + math.floor(18 * uiScale)
+    local listW = colW - listPad * 2
+    local listH = contentH - (listY - colY) - listPad
+    local cardGap = math.max(4, math.floor(6 * uiScale))
+    local cards = nil
+    local buttonList = nil
+    local minCardW = math.max(56, math.floor(58 * uiScale))
+    local maxCols = 6
+    local mode = headers[i]
+
+    if mode == "deck" then
+      cards = deckCards
+      buttonList = ui.deckCardButtons
+    elseif mode == "inventory" then
+      cards = inventoryCards
+      buttonList = ui.deckInventoryButtons
+    elseif mode == "shop" then
+      cards = shopCards
+      buttonList = ui.deckShopButtons
+      minCardW = math.max(62, math.floor(64 * uiScale))
+      maxCols = 5
+    end
+
+    if not cards or not buttonList then
       setColorScaled(palette.text, 1, 0.55)
       drawText("empty", colX + math.floor(10 * uiScale), colY + lineH + math.floor(18 * uiScale))
+    else
+      for n = #buttonList, #cards + 1, -1 do
+        buttonList[n] = nil
+      end
+
+      if #cards == 0 then
+        setColorScaled(palette.text, 1, 0.55)
+        drawText("empty", colX + math.floor(10 * uiScale), colY + lineH + math.floor(18 * uiScale))
+      else
+        local cols, cardW, cardH = chooseCardGridLayout(#cards, listW, listH, cardGap, minCardW, maxCols)
+        for n = 1, #cards do
+          local cardId = cards[n]
+          local cardDef = Config.CARD_DEFS[cardId]
+          local btn = buttonList[n] or {}
+          buttonList[n] = btn
+          local colIndex = (n - 1) % cols
+          local rowIndex = math.floor((n - 1) / cols)
+          btn.x = listX + colIndex * (cardW + cardGap)
+          btn.y = listY + rowIndex * (cardH + cardGap)
+          btn.w = cardW
+          btn.h = cardH
+          btn.cardId = cardId
+
+          local hovered = pointInRect(mouseX, mouseY, btn)
+          local alpha = 1
+          local footerText = ""
+          if mode == "deck" then
+            alpha = (runtime.deckBuilder and runtime.deckBuilder:canRemoveFromDeck(cardId)) and 1 or 0.45
+          elseif mode == "inventory" then
+            alpha = (runtime.deckBuilder and runtime.deckBuilder:canAddToDeck(cardId)) and 1 or 0.45
+          elseif mode == "shop" then
+            local price = cardDef and (cardDef.shopPrice or 0) or 0
+            alpha = currency >= price and 1 or 0.45
+            footerText = "shop " .. tostring(price)
+          end
+
+          drawCardFace(btn, cardDef, {
+            hovered = hovered,
+            alpha = alpha,
+            cost = cardDef and cardDef.cost or 0,
+            moonCount = moonCount,
+            moonBonus = previewMoonRpmBonus(cardDef),
+            footerText = footerText,
+          })
+
+          if hovered and cardDef then
+            if mode == "deck" then
+              local removable = runtime.deckBuilder and runtime.deckBuilder:canRemoveFromDeck(cardId)
+              local actionLine = removable and "remove" or ("min deck " .. tostring(minDeckSize))
+              hoveredTooltipBtn = btn
+              hoveredTooltipLines = {
+                {pre = cardDef.tooltip, hi = "", post = ""},
+                {pre = "cost ", hi = tostring(cardDef.cost), post = " energy"},
+                {pre = "deck copies ", hi = tostring(deckCounts[cardId] or 0), post = ""},
+                {pre = "click ", hi = actionLine, post = removable and " to inventory" or ""},
+              }
+            elseif mode == "inventory" then
+              local addable = runtime.deckBuilder and runtime.deckBuilder:canAddToDeck(cardId)
+              local actionLine = addable and "add" or ("max deck " .. tostring(maxDeckSize))
+              hoveredTooltipBtn = btn
+              hoveredTooltipLines = {
+                {pre = cardDef.tooltip, hi = "", post = ""},
+                {pre = "cost ", hi = tostring(cardDef.cost), post = " energy"},
+                {pre = "inventory copies ", hi = tostring(inventoryCounts[cardId] or 0), post = ""},
+                {pre = "click ", hi = actionLine, post = addable and " to deck" or ""},
+              }
+            elseif mode == "shop" then
+              local price = cardDef.shopPrice or 0
+              hoveredTooltipBtn = btn
+              hoveredTooltipLines = {
+                {pre = cardDef.tooltip, hi = "", post = ""},
+                {pre = "cost ", hi = tostring(cardDef.cost), post = " energy"},
+                {pre = "shop ", hi = tostring(price), post = ""},
+                {pre = "owned ", hi = tostring(inventoryCounts[cardId] or 0), post = ""},
+                {pre = "click ", hi = "buy", post = ""},
+              }
+            end
+          end
+        end
+      end
     end
   end
 
