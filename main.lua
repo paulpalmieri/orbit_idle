@@ -100,10 +100,34 @@ local ui = {
   endTurnBtn = {x = 0, y = 0, w = 0, h = 0},
   endGameMenuBtn = {x = 0, y = 0, w = 0, h = 0},
   endGameReplayBtn = {x = 0, y = 0, w = 0, h = 0},
+  feedbackAnchors = {
+    turn = {x = 0, y = 0},
+    energy = {x = 0, y = 0},
+    heat = {x = 0, y = 0},
+    rpm = {x = 0, y = 0},
+  },
 }
 
 local runtime = {}
 local playMenuBuyClickFx
+local micro = {
+  lockInput = false,
+  sequence = nil,
+  floatingTexts = {},
+  floatingLane = {},
+  floatingQueueAt = {},
+  displayEnergy = state.energy,
+  displayHeat = state.heat,
+  displayTurn = state.turn,
+  rpmHold = false,
+  rpmHoldValue = 0,
+  summonEntries = {},
+  trailBoost = 0,
+  orbitLineBoost = 0,
+  corePulse = 0,
+  coolDown = 0,
+  reshuffleCue = 0,
+}
 
 local function activeSphereShadeStyle()
   if state.sphereDitherEnabled then
@@ -570,7 +594,11 @@ local function speedWaveBoostFor(_)
 end
 
 function blackHoleStabilitySpeedMultiplier()
-  return 1
+  if micro.coolDown <= 0 then
+    return 1
+  end
+  local t = clamp(micro.coolDown / 0.16, 0, 1)
+  return 1 - 0.09 * t
 end
 
 local function collectAllOrbiters()
@@ -604,13 +632,366 @@ local function triggerGravityPulse()
   end
 end
 
-local function endPlayerTurn()
-  if runtime.cardRun then
-    runtime.cardRun:endPlayerTurn()
+local function copyList(list)
+  local out = {}
+  for i = 1, #list do
+    out[i] = list[i]
+  end
+  return out
+end
+
+local function syncMicroDisplayFromState()
+  if micro.lockInput then
+    return
+  end
+  micro.displayEnergy = state.energy
+  micro.displayHeat = state.heat
+  micro.displayTurn = state.turn
+end
+
+local function beginFloatingText(anchorId, label, color, opts)
+  opts = opts or {}
+  local anchor = ui.feedbackAnchors[anchorId] or {x = offsetX + Config.GAME_W * scale * 0.5, y = offsetY + Config.GAME_H * scale * 0.5}
+  local now = state.time or 0
+  local queueAt = micro.floatingQueueAt[anchorId] or now
+  local queueSpacing = opts.queueSpacing or 0.22
+  local spawnAt = math.max(now, queueAt)
+  micro.floatingQueueAt[anchorId] = spawnAt + queueSpacing
+
+  local lane = micro.floatingLane[anchorId] or 0
+  micro.floatingLane[anchorId] = (lane + 1) % 3
+  local laneOffset = (lane - 1) * (12 * math.max(scale, 1))
+  local delay = (opts.delay or 0) + (spawnAt - now) + lane * 0.04
+  micro.floatingTexts[#micro.floatingTexts + 1] = {
+    x = anchor.x + laneOffset,
+    y = anchor.y + (opts.yOffset or (-14 * math.max(scale, 1))),
+    text = string.lower(tostring(label or "")),
+    color = color or swatch.brightest,
+    age = -delay,
+    life = opts.life or 4.00,
+    rise = opts.rise or (42 * math.max(scale, 1)),
+  }
+end
+
+local function cardEffectClass(cardDef)
+  if not cardDef then
+    return "generic"
+  end
+  local id = cardDef.id
+  if id == "moonseed" or id == "heavy_moon" or id == "twin_seed" or id == "anchor" then
+    return "summon"
+  end
+  if id == "spin_up" or id == "precision_spin" or id == "compression" then
+    return "permanent"
+  end
+  if id == "overclock" or id == "redline" or id == "resonant_burst" then
+    return "burst"
+  end
+  if id == "coolant_vent" or id == "cold_sink" or id == "containment" then
+    return "vent"
+  end
+  if id == "reactor_feed" then
+    return "reactor"
+  end
+  return "generic"
+end
+
+local function cardTimingProfile(cardDef)
+  local id = cardDef and cardDef.id or ""
+  local profile = {
+    commit = 0.22,
+    cost = 0.26,
+    effect = 0.60,
+    result = 0.28,
+    settle = 0.20,
+    summonGuide = 0.20,
+    summonStreak = 0.40,
+  }
+
+  local isUtility = id == "coolant_vent"
+    or id == "cold_sink"
+    or id == "containment"
+    or id == "compression"
+    or id == "reactor_feed"
+  if isUtility then
+    profile.commit = 0.20
+    profile.cost = 0.24
+    profile.effect = 0.50
+    profile.result = 0.24
+    profile.settle = 0.16
+    profile.summonGuide = 0.18
+    profile.summonStreak = 0.32
+    return profile
+  end
+
+  local isBig = id == "moonseed"
+    or id == "heavy_moon"
+    or id == "twin_seed"
+    or id == "anchor"
+    or id == "redline"
+    or id == "resonant_burst"
+  if isBig then
+    profile.commit = 0.24
+    profile.cost = 0.30
+    profile.effect = 0.80
+    profile.result = 0.32
+    profile.settle = 0.24
+    profile.summonGuide = 0.22
+    profile.summonStreak = 0.48
+  end
+
+  return profile
+end
+
+local function canResolveCardNow(cardDef)
+  if not cardDef then
+    return false
+  end
+  local id = cardDef.id
+  if id == "moonseed" then
+    return #state.moons < Config.MAX_MOONS
+  end
+  if id == "twin_seed" then
+    return (#state.moons + 2) <= Config.MAX_MOONS
+  end
+  if id == "anchor" then
+    return #state.satellites < Config.MAX_SATELLITES
+  end
+  return true
+end
+
+local function estimateCardHeatDelta(cardDef)
+  if not cardDef then
+    return 0
+  end
+
+  local heatGain = 0
+  local vent = 0
+  local id = cardDef.id
+  if id == "moonseed" then
+    heatGain = 1
+  elseif id == "spin_up" then
+    heatGain = 1
+  elseif id == "overclock" then
+    heatGain = 1
+  elseif id == "heavy_moon" then
+    heatGain = 2
+  elseif id == "twin_seed" then
+    heatGain = 2
+  elseif id == "precision_spin" then
+    heatGain = 2
+  elseif id == "redline" then
+    heatGain = 2
+  elseif id == "reactor_feed" then
+    heatGain = 1
+  elseif id == "resonant_burst" then
+    heatGain = 2
+  elseif id == "coolant_vent" then
+    vent = 2
+  elseif id == "cold_sink" then
+    vent = 4
+  elseif id == "containment" then
+    vent = 2
+  end
+
+  local reduction = state.nextCardHeatReduction or 0
+  if reduction > 0 then
+    heatGain = math.max(0, heatGain - reduction)
+  end
+
+  local afterVent = math.max(0, state.heat - vent)
+  local finalHeat = math.min(state.heatCap, afterVent + heatGain)
+  return finalHeat - state.heat
+end
+
+local function cardHasHeatGain(cardDef)
+  if not cardDef then
+    return false
+  end
+  local id = cardDef.id
+  return id == "moonseed"
+    or id == "spin_up"
+    or id == "overclock"
+    or id == "heavy_moon"
+    or id == "twin_seed"
+    or id == "precision_spin"
+    or id == "redline"
+    or id == "reactor_feed"
+    or id == "resonant_burst"
+end
+
+local function addMoonVisualPulse(duration)
+  if duration <= 0 then
+    return
+  end
+  local orbiters = collectAllOrbiters()
+  for i = 1, #orbiters do
+    local orbiter = orbiters[i]
+    if runtime.cardRun and runtime.cardRun:isMoonBody(orbiter) then
+      orbiter.boostDurations = orbiter.boostDurations or {}
+      orbiter.boostDurations[#orbiter.boostDurations + 1] = duration
+    end
   end
 end
 
-local function currentCardCost(cardDef)
+local function triggerMachineFxForCard(cardDef)
+  local effectClass = cardEffectClass(cardDef)
+  if effectClass == "permanent" then
+    micro.orbitLineBoost = math.max(micro.orbitLineBoost, 0.60)
+    micro.trailBoost = math.max(micro.trailBoost, 0.50)
+    addMoonVisualPulse(0.14)
+    return
+  end
+  if effectClass == "burst" then
+    micro.orbitLineBoost = math.max(micro.orbitLineBoost, 0.65)
+    micro.trailBoost = math.max(micro.trailBoost, 0.70)
+    micro.corePulse = math.max(micro.corePulse, 0.20)
+    addMoonVisualPulse(0.20)
+    triggerGravityPulse()
+    return
+  end
+  if effectClass == "vent" then
+    micro.coolDown = math.max(micro.coolDown, 0.16)
+    return
+  end
+  if effectClass == "reactor" then
+    micro.corePulse = math.max(micro.corePulse, 0.12)
+    return
+  end
+end
+
+local function buildOrbiterSet(orbiters)
+  local set = {}
+  for i = 1, #orbiters do
+    set[orbiters[i]] = true
+  end
+  return set
+end
+
+local function summonEntryStartPosition(orbiter)
+  local tx = orbiter.x or cx
+  local ty = orbiter.y or cy
+  local dx = tx - cx
+  local dy = ty - cy
+  local len = math.sqrt(dx * dx + dy * dy)
+  if len < 0.001 then
+    dx, dy, len = 1, 0, 1
+  end
+  dx = dx / len
+  dy = dy / len
+  local edge = math.sqrt(Config.GAME_W * Config.GAME_W + Config.GAME_H * Config.GAME_H) * 0.62
+  return cx + dx * edge, cy + dy * edge, (orbiter.z or 0) + 0.10
+end
+
+local function beginSummonStreakFor(orbiter, timing)
+  if not orbiter then
+    return
+  end
+  local sx, sy, sz = summonEntryStartPosition(orbiter)
+  local guideDuration = timing and timing.summonGuide or 0.10
+  local streakDuration = timing and timing.summonStreak or 0.20
+  orbiter.microHidden = true
+  micro.summonEntries[#micro.summonEntries + 1] = {
+    orbiter = orbiter,
+    age = 0,
+    guideDuration = guideDuration,
+    streakDuration = streakDuration,
+    startX = sx,
+    startY = sy,
+    startZ = sz,
+  }
+end
+
+local currentCardCost
+
+local function beginCardPlaySequence(handIndex)
+  if not runtime.cardRun or micro.lockInput or state.runComplete then
+    return false
+  end
+
+  local cardId = state.hand[handIndex]
+  if not cardId then
+    return false
+  end
+  local cardDef = Config.CARD_DEFS[cardId]
+  if not cardDef or not canResolveCardNow(cardDef) then
+    return false
+  end
+
+  local cost = currentCardCost(cardDef)
+  if state.energy < cost then
+    return false
+  end
+  local timing = cardTimingProfile(cardDef)
+
+  micro.lockInput = true
+  micro.sequence = {
+    type = "card_play",
+    phase = "commit",
+    timer = timing.commit,
+    handIndex = handIndex,
+    handSnapshot = copyList(state.hand),
+    cardDef = cardDef,
+    cost = cost,
+    commitDuration = timing.commit,
+    costDuration = timing.cost,
+    resultDuration = timing.result,
+    settleDuration = timing.settle,
+    predictedHeatDelta = estimateCardHeatDelta(cardDef),
+    beforeHeat = state.heat,
+    beforeRpm = math.floor(computeTotalRpm() + 0.5),
+    beforeOrbiters = buildOrbiterSet(collectAllOrbiters()),
+    afterRpm = math.floor(computeTotalRpm() + 0.5),
+    actualHeatDelta = 0,
+    actualRpmDelta = 0,
+    effectDuration = timing.effect,
+    timing = timing,
+  }
+  micro.rpmHold = false
+  return true
+end
+
+local function finalizeCardPlaySequence()
+  micro.rpmHold = false
+  micro.sequence = nil
+  micro.lockInput = false
+  micro.displayEnergy = state.energy
+  micro.displayHeat = state.heat
+end
+
+local function beginTurnTransitionSequence()
+  if not runtime.cardRun or micro.lockInput or state.runComplete then
+    return false
+  end
+  micro.lockInput = true
+  micro.sequence = {
+    type = "turn_transition",
+    phase = "discard_hand",
+    timer = math.max(0.17, 0.13 + #state.hand * 0.022),
+    discardDuration = math.max(0.17, 0.13 + #state.hand * 0.022),
+    endEffectsDuration = 0.08,
+    heatDuration = 0.10,
+    settleDuration = 0.10,
+    turnLabelDuration = 0.12,
+    handSnapshot = copyList(state.hand),
+    endTurnHeat = 0,
+    drawElapsed = 0,
+    drawDuration = 0,
+    drawTail = 0.05,
+    drawStagger = 0.04,
+    drawItemDuration = 0.18,
+    reshuffled = false,
+    refillTick = 0.05,
+    refillAccumulator = 0,
+  }
+  return true
+end
+
+local function endPlayerTurn()
+  return beginTurnTransitionSequence()
+end
+
+currentCardCost = function(cardDef)
   if runtime.cardRun then
     return runtime.cardRun:currentCardCost(cardDef)
   end
@@ -618,16 +999,263 @@ local function currentCardCost(cardDef)
 end
 
 local function playCard(handIndex)
-  if runtime.cardRun then
-    return runtime.cardRun:playCard(handIndex)
-  end
-  return false
+  return beginCardPlaySequence(handIndex)
 end
 
 local function startCardRun()
   if runtime.cardRun then
     runtime.cardRun:startCardRun()
   end
+  micro.lockInput = false
+  micro.sequence = nil
+  micro.rpmHold = false
+  micro.floatingTexts = {}
+  micro.floatingLane = {}
+  micro.floatingQueueAt = {}
+  micro.summonEntries = {}
+  micro.trailBoost = 0
+  micro.orbitLineBoost = 0
+  micro.corePulse = 0
+  micro.coolDown = 0
+  micro.reshuffleCue = 0
+  micro.displayEnergy = state.energy
+  micro.displayHeat = state.heat
+  micro.displayTurn = state.turn
+end
+
+local function finalizeTurnTransitionSequence()
+  micro.sequence = nil
+  micro.lockInput = false
+  micro.displayEnergy = state.energy
+  micro.displayHeat = state.heat
+  micro.displayTurn = state.turn
+end
+
+local function updateCardPlaySequence(dt)
+  local ctx = micro.sequence
+  if not ctx or ctx.type ~= "card_play" then
+    return
+  end
+
+  ctx.timer = ctx.timer - dt
+  if ctx.timer > 0 then
+    return
+  end
+
+  if ctx.phase == "commit" then
+    if ctx.cost > 0 then
+      beginFloatingText("energy", string.format("-%d Energy", ctx.cost), swatch.brightest)
+    end
+    if cardHasHeatGain(ctx.cardDef) then
+      beginFloatingText("heat", string.format("+%d Heat", math.max(0, ctx.predictedHeatDelta)), swatch.bright)
+    end
+    ctx.phase = "cost"
+    ctx.timer = ctx.costDuration
+    return
+  end
+
+  if ctx.phase == "cost" then
+    local played = runtime.cardRun and runtime.cardRun:playCard(ctx.handIndex)
+    if not played then
+      finalizeCardPlaySequence()
+      return
+    end
+
+    micro.displayEnergy = state.energy
+    micro.displayHeat = state.heat
+    ctx.actualHeatDelta = state.heat - ctx.beforeHeat
+    if ctx.actualHeatDelta < 0 then
+      beginFloatingText("heat", string.format("-%d Heat", -ctx.actualHeatDelta), swatch.brightest)
+    elseif ctx.actualHeatDelta > 0 and ctx.predictedHeatDelta <= 0 then
+      beginFloatingText("heat", string.format("+%d Heat", ctx.actualHeatDelta), swatch.bright)
+    end
+
+    local afterOrbiters = collectAllOrbiters()
+    for i = 1, #afterOrbiters do
+      local orbiter = afterOrbiters[i]
+      if not ctx.beforeOrbiters[orbiter] then
+        beginSummonStreakFor(orbiter, ctx.timing)
+      end
+    end
+
+    triggerMachineFxForCard(ctx.cardDef)
+
+    ctx.afterRpm = math.floor(computeTotalRpm() + 0.5)
+    ctx.actualRpmDelta = ctx.afterRpm - ctx.beforeRpm
+    micro.rpmHold = true
+    micro.rpmHoldValue = ctx.beforeRpm
+
+    ctx.phase = "effect"
+    ctx.timer = ctx.effectDuration
+    return
+  end
+
+  if ctx.phase == "effect" then
+    micro.rpmHold = false
+    if ctx.actualRpmDelta ~= 0 then
+      local sign = ctx.actualRpmDelta > 0 and "+" or ""
+      beginFloatingText("rpm", sign .. tostring(ctx.actualRpmDelta) .. " RPM", swatch.brightest)
+    else
+      beginFloatingText("rpm", tostring(ctx.afterRpm) .. " RPM", swatch.brightest)
+    end
+    ctx.phase = "result"
+    ctx.timer = ctx.resultDuration
+    return
+  end
+
+  if ctx.phase == "result" then
+    ctx.phase = "settle"
+    ctx.timer = ctx.settleDuration
+    return
+  end
+
+  finalizeCardPlaySequence()
+end
+
+local function updateTurnTransitionSequence(dt)
+  local ctx = micro.sequence
+  if not ctx or ctx.type ~= "turn_transition" then
+    return
+  end
+
+  if ctx.phase == "energy_refill" then
+    ctx.refillAccumulator = ctx.refillAccumulator + dt
+    while ctx.refillAccumulator >= ctx.refillTick and micro.displayEnergy < state.energy do
+      ctx.refillAccumulator = ctx.refillAccumulator - ctx.refillTick
+      micro.displayEnergy = micro.displayEnergy + 1
+      beginFloatingText("energy", "+1", swatch.brightest)
+    end
+    if micro.displayEnergy >= state.energy then
+      ctx.phase = "draw_hand"
+      ctx.drawElapsed = 0
+      local handCount = #state.hand
+      ctx.drawDuration = ctx.drawItemDuration + math.max(0, handCount - 1) * ctx.drawStagger + ctx.drawTail
+      if ctx.reshuffled then
+        micro.reshuffleCue = math.max(micro.reshuffleCue, 0.16)
+      end
+    end
+    return
+  end
+
+  if ctx.phase == "draw_hand" then
+    ctx.drawElapsed = math.min(ctx.drawDuration, ctx.drawElapsed + dt)
+    if ctx.drawElapsed >= ctx.drawDuration then
+      finalizeTurnTransitionSequence()
+    end
+    return
+  end
+
+  ctx.timer = ctx.timer - dt
+  if ctx.timer > 0 then
+    return
+  end
+
+  if ctx.phase == "discard_hand" then
+    if runtime.cardRun then
+      runtime.cardRun:discardCurrentHand()
+    end
+    ctx.phase = "end_effects"
+    ctx.timer = ctx.endEffectsDuration
+    return
+  end
+
+  if ctx.phase == "end_effects" then
+    local beforeHeat = state.heat
+    local heatGain = math.max(0, Config.END_TURN_HEAT_GAIN - (runtime.cardRun and runtime.cardRun:countAnchors() or 0))
+    ctx.endTurnHeat = heatGain
+    if runtime.cardRun then
+      runtime.cardRun:addHeat(heatGain)
+      runtime.cardRun:syncOrbiterSpeedsFromBodies()
+      runtime.cardRun:updateHighestRpm()
+    end
+    micro.displayHeat = state.heat
+    local heatDelta = state.heat - beforeHeat
+    if heatDelta >= 0 then
+      beginFloatingText("heat", string.format("+%d Heat", heatDelta), swatch.bright)
+    else
+      beginFloatingText("heat", string.format("-%d Heat", -heatDelta), swatch.brightest)
+    end
+    ctx.phase = "heat_gain"
+    ctx.timer = ctx.heatDuration
+    return
+  end
+
+  if ctx.phase == "heat_gain" then
+    ctx.phase = "settle"
+    ctx.timer = ctx.settleDuration
+    return
+  end
+
+  if ctx.phase == "settle" then
+    if state.runComplete then
+      finalizeTurnTransitionSequence()
+      return
+    end
+    if state.turn >= state.maxTurns then
+      if runtime.cardRun then
+        runtime.cardRun:finishRun("completed")
+      end
+      finalizeTurnTransitionSequence()
+      return
+    end
+
+    local beforeDraw = #state.drawPile
+    local beforeDiscard = #state.discardPile
+    if runtime.cardRun then
+      runtime.cardRun:beginTurn(state.turn + 1)
+    end
+    ctx.reshuffled = beforeDraw == 0 and beforeDiscard > 0
+    micro.displayTurn = state.turn
+    micro.displayEnergy = 0
+    beginFloatingText("turn", "Turn " .. tostring(state.turn), swatch.brightest)
+    ctx.phase = "turn_label"
+    ctx.timer = ctx.turnLabelDuration
+    return
+  end
+
+  if ctx.phase == "turn_label" then
+    ctx.phase = "energy_refill"
+    ctx.refillAccumulator = 0
+    return
+  end
+end
+
+local function updateMicroInteractions(dt)
+  for i = #micro.floatingTexts, 1, -1 do
+    local text = micro.floatingTexts[i]
+    text.age = text.age + dt
+    if text.age >= text.life then
+      table.remove(micro.floatingTexts, i)
+    end
+  end
+
+  for i = #micro.summonEntries, 1, -1 do
+    local entry = micro.summonEntries[i]
+    entry.age = entry.age + dt
+    local total = entry.guideDuration + entry.streakDuration
+    if entry.age >= total then
+      if entry.orbiter then
+        entry.orbiter.microHidden = nil
+      end
+      table.remove(micro.summonEntries, i)
+    end
+  end
+
+  micro.trailBoost = math.max(0, micro.trailBoost - dt)
+  micro.orbitLineBoost = math.max(0, micro.orbitLineBoost - dt)
+  micro.corePulse = math.max(0, micro.corePulse - dt)
+  micro.coolDown = math.max(0, micro.coolDown - dt)
+  micro.reshuffleCue = math.max(0, micro.reshuffleCue - dt)
+
+  if micro.sequence then
+    if micro.sequence.type == "card_play" then
+      updateCardPlaySequence(dt)
+    elseif micro.sequence.type == "turn_transition" then
+      updateTurnTransitionSequence(dt)
+    end
+  end
+
+  syncMicroDisplayFromState()
 end
 
 function switchScreen(screenId)
@@ -651,6 +1279,29 @@ function startRunFromMenu()
   end
   startCardRun()
   switchScreen("run")
+  micro.lockInput = true
+  micro.displayEnergy = 0
+  micro.sequence = {
+    type = "turn_transition",
+    phase = "turn_label",
+    timer = 0.12,
+    discardDuration = 0.17,
+    endEffectsDuration = 0.08,
+    heatDuration = 0.10,
+    settleDuration = 0.10,
+    turnLabelDuration = 0.12,
+    handSnapshot = {},
+    endTurnHeat = 0,
+    drawElapsed = 0,
+    drawDuration = 0,
+    drawTail = 0.05,
+    drawStagger = 0.04,
+    drawItemDuration = 0.18,
+    reshuffled = false,
+    refillTick = 0.05,
+    refillAccumulator = 0,
+  }
+  beginFloatingText("turn", "Turn " .. tostring(state.turn), swatch.brightest)
 end
 
 local function onPlanetClicked()
@@ -692,7 +1343,7 @@ local function initGameSystems()
     updateOrbiterPosition = updateOrbiterPosition,
     assignRenderOrder = assignRenderOrder,
     getStabilitySpeedMultiplier = function()
-      return 1
+      return blackHoleStabilitySpeedMultiplier()
     end,
     getTransientBoost = function()
       return 0
@@ -795,6 +1446,102 @@ function drawSelectedLightOrbit(frontPass)
   end
 end
 
+local function orbiterVisualRadius(orbiter)
+  local kind = orbiter and orbiter.kind or ""
+  if kind == "moon" then
+    return Config.BODY_VISUAL.moonRadius, 20
+  end
+  if kind == "planet" then
+    return Config.BODY_VISUAL.orbitPlanetRadius, 24
+  end
+  if kind == "mega-planet" then
+    return Config.BODY_VISUAL.megaPlanetRadius, 36
+  end
+  if kind == "satellite" then
+    return Config.BODY_VISUAL.satelliteRadius, 18
+  end
+  if kind == "moon-satellite" then
+    return Config.BODY_VISUAL.moonChildSatelliteRadius, 12
+  end
+  return Config.BODY_VISUAL.moonRadius, 20
+end
+
+local function drawOrbiterGuidePath(orbiter, frontPass, alpha)
+  if not orbiter then
+    return
+  end
+
+  local originX, originY, originZ = orbiterOrbitOrigin(orbiter)
+  local cp = math.cos(orbiter.plane)
+  local sp = math.sin(orbiter.plane)
+  local px, py, pz
+  local r, g, b = computeOrbiterColor(orbiter.angle)
+  local guideAlpha = clamp(alpha or 0.52, 0, 1)
+
+  for a = 0, math.pi * 2 + 0.12, 0.12 do
+    local ox = math.cos(a) * orbiter.radius
+    local oy = math.sin(a) * orbiter.radius * orbiter.flatten
+    local x = originX + ox * cp - oy * sp
+    local y = originY + ox * sp + oy * cp
+    local z = originZ + (orbiter.zBase or 0) + math.sin(a) * (orbiter.depthScale or 1)
+    if px then
+      local segZ = (pz + z) * 0.5
+      if (frontPass and segZ > 0) or ((not frontPass) and segZ <= 0) then
+        local light = cameraLightAt((px + x) * 0.5, (py + y) * 0.5, segZ)
+        setLitColorDirect(r, g, b, light, guideAlpha)
+        local sx0, sy0 = projectWorldPoint(px, py, pz)
+        local sx1, sy1 = projectWorldPoint(x, y, z)
+        love.graphics.line(math.floor(sx0 + 0.5), math.floor(sy0 + 0.5), math.floor(sx1 + 0.5), math.floor(sy1 + 0.5))
+      end
+    end
+    px, py, pz = x, y, z
+  end
+end
+
+local function drawSummonEntries(frontPass)
+  for i = 1, #micro.summonEntries do
+    local entry = micro.summonEntries[i]
+    local orbiter = entry.orbiter
+    if orbiter then
+      if entry.age < entry.guideDuration then
+        local t = clamp(entry.age / math.max(0.001, entry.guideDuration), 0, 1)
+        drawOrbiterGuidePath(orbiter, frontPass, 0.62 * (1 - t * 0.55))
+      else
+        local streakAge = entry.age - entry.guideDuration
+        local streakT = clamp(streakAge / math.max(0.001, entry.streakDuration), 0, 1)
+        local eased = smoothstep(streakT)
+        local tx, ty, tz = orbiter.x or cx, orbiter.y or cy, orbiter.z or 0
+        local x = lerp(entry.startX, tx, eased)
+        local y = lerp(entry.startY, ty, eased)
+        local z = lerp(entry.startZ, tz, eased)
+        if (frontPass and z > 0) or ((not frontPass) and z <= 0) then
+          local r, g, b = computeOrbiterColor(orbiter.angle)
+          local radius, segments = orbiterVisualRadius(orbiter)
+          local light = cameraLightAt(x, y, z)
+          setLitColorDirect(r, g, b, light, 0.46 * (1 - streakT))
+          local sx0, sy0 = projectWorldPoint(entry.startX, entry.startY, entry.startZ)
+          local sx1, sy1 = projectWorldPoint(x, y, z)
+          love.graphics.line(sx0, sy0, sx1, sy1)
+          drawLitSphere(x, y, z, radius, r, g, b, light, segments)
+        end
+      end
+    end
+  end
+end
+
+local function drawMachineGuides(frontPass)
+  if micro.orbitLineBoost > 0 and runtime.cardRun then
+    local t = clamp(micro.orbitLineBoost / 0.20, 0, 1)
+    local orbiters = collectAllOrbiters()
+    for i = 1, #orbiters do
+      if runtime.cardRun:isMoonBody(orbiters[i]) then
+        drawOrbiterGuidePath(orbiters[i], frontPass, 0.34 + t * 0.22)
+      end
+    end
+  end
+  drawSummonEntries(frontPass)
+end
+
 function drawLitSphere(x, y, z, radius, r, g, b, lightScale, segments)
   local px, py, projectScale = projectWorldPoint(x, y, z or 0)
   local pr = math.max(0.6, radius * projectScale)
@@ -867,6 +1614,14 @@ function drawPlanet()
   local t = 1 - clamp(state.planetBounceTime / Config.PLANET_BOUNCE_DURATION, 0, 1)
   local kick = math.sin(t * math.pi)
   local bounceScale = 1 + kick * 0.14 * (1 - t)
+  if micro.corePulse > 0 then
+    local coreT = clamp(micro.corePulse / 0.20, 0, 1)
+    bounceScale = bounceScale * (1 + coreT * 0.07)
+  end
+  if micro.coolDown > 0 then
+    local coolT = clamp(micro.coolDown / 0.16, 0, 1)
+    bounceScale = bounceScale * (1 - coolT * 0.05)
+  end
   local px, py, projScale = projectWorldPoint(cx, cy, 0)
   local pr = math.max(3, Config.BODY_VISUAL.planetRadius * bounceScale * projScale)
 
@@ -1005,10 +1760,11 @@ function drawMoon(moon)
     end
   end
 
-  if hasActiveBoost(moon) then
-    local baseTrailLen = math.min(moon.radius * 2.2, 20 + moon.boost * 28)
+  local trailBoostT = clamp(micro.trailBoost / 0.22, 0, 1)
+  if hasActiveBoost(moon) or trailBoostT > 0 then
+    local baseTrailLen = math.min(moon.radius * 2.4, 20 + moon.boost * 28 + trailBoostT * 16)
     local originX, originY, originZ = orbiterOrbitOrigin(moon)
-    drawOrbitalTrail(moon, baseTrailLen, 0.48, 0.03, originX, originY, originZ, moon.light)
+    drawOrbitalTrail(moon, baseTrailLen, 0.48 + trailBoostT * 0.10, 0.03, originX, originY, originZ, moon.light)
   end
 
   local childSatellites = moon.childSatellites or {}
@@ -1032,21 +1788,26 @@ end
 
 function drawMoonChildSatellite(child)
   local parentMoon = child.parentOrbiter or child.parentMoon
-  if hasActiveBoost(child) then
-    local baseTrailLen = math.min(child.radius * 2.2, 16 + child.boost * 22)
+  local trailBoostT = clamp(micro.trailBoost / 0.22, 0, 1)
+  if hasActiveBoost(child) or trailBoostT > 0 then
+    local baseTrailLen = math.min(child.radius * 2.4, 16 + child.boost * 22 + trailBoostT * 10)
     local originX = parentMoon and parentMoon.x or cx
     local originY = parentMoon and parentMoon.y or cy
     local originZ = parentMoon and parentMoon.z or 0
-    drawOrbitalTrail(child, baseTrailLen, 0.44, 0.02, originX, originY, originZ, child.light)
+    drawOrbitalTrail(child, baseTrailLen, 0.44 + trailBoostT * 0.08, 0.02, originX, originY, originZ, child.light)
   end
   local childR, childG, childB = computeOrbiterColor(child.angle)
   drawLitSphere(child.x, child.y, child.z, Config.BODY_VISUAL.moonChildSatelliteRadius, childR, childG, childB, child.light, 12)
 end
 
 function drawOrbitPlanet(planet)
-  if hasActiveBoost(planet) then
-    local baseTrailLen = math.min(planet.radius * 2.2, 28 + planet.boost * 36)
-    drawOrbitalTrail(planet, baseTrailLen, 0.5, 0.04, nil, nil, 0, planet.light)
+  local trailBoostT = 0
+  if runtime.cardRun and runtime.cardRun:isMoonBody(planet) then
+    trailBoostT = clamp(micro.trailBoost / 0.22, 0, 1)
+  end
+  if hasActiveBoost(planet) or trailBoostT > 0 then
+    local baseTrailLen = math.min(planet.radius * 2.4, 28 + planet.boost * 36 + trailBoostT * 20)
+    drawOrbitalTrail(planet, baseTrailLen, 0.5 + trailBoostT * 0.10, 0.04, nil, nil, 0, planet.light)
   end
   local pr, pg, pb = computeOrbiterColor(planet.angle)
   drawLitSphere(planet.x, planet.y, planet.z, Config.BODY_VISUAL.orbitPlanetRadius, pr, pg, pb, planet.light, 24)
@@ -1138,6 +1899,9 @@ function collectRenderOrbiters()
 end
 
 function drawOrbiterByKind(orbiter)
+  if orbiter and orbiter.microHidden then
+    return
+  end
   if orbiter.kind == "moon" then
     drawMoon(orbiter)
   elseif orbiter.kind == "moon-satellite" then
@@ -1545,6 +2309,31 @@ local function chooseCardGridLayout(totalCards, listW, listH, gap, minCardW, max
   return fallbackCols, fallbackW, fallbackH
 end
 
+local function handFanYOffset(index, count, uiScale)
+  if count <= 1 then
+    return 0
+  end
+  local center = (count + 1) * 0.5
+  local dist = math.abs(index - center)
+  return math.floor(dist * 1.5 * uiScale)
+end
+
+local function drawFloatingTexts()
+  local font = love.graphics.getFont()
+  for i = 1, #micro.floatingTexts do
+    local entry = micro.floatingTexts[i]
+    if entry.age >= 0 then
+      local t = clamp(entry.age / math.max(0.001, entry.life), 0, 1)
+      local eased = smoothstep(t)
+      local y = entry.y - entry.rise * eased
+      local alpha = 1 - eased
+      local x = entry.x - font:getWidth(entry.text) * 0.5
+      setColorScaled(entry.color, 1, alpha)
+      drawText(entry.text, x, y)
+    end
+  end
+end
+
 local function drawHud()
   local font = love.graphics.getFont()
   local uiScale = scale >= 1 and scale or 1
@@ -1554,25 +2343,31 @@ local function drawHud()
   local viewportY = offsetY
   local viewportW = Config.GAME_W * scale
   local viewportH = Config.GAME_H * scale
+
   local totalRpm = computeTotalRpm()
   local rpmInt = math.floor(totalRpm + 0.5)
   local rpmFont = getRpmDisplayFont()
   local rpmY = viewportY + math.floor(4 * uiScale)
   local shownRpm = rpmInt
-  if state.rpmRollTimer > 0 and state.rpmRollFrom ~= state.rpmRollTo then
+  if micro.rpmHold then
+    shownRpm = micro.rpmHoldValue
+  elseif state.rpmRollTimer > 0 and state.rpmRollFrom ~= state.rpmRollTo then
     local t = 1 - clamp(state.rpmRollTimer / state.rpmRollDuration, 0, 1)
     local eased = smoothstep(t)
     shownRpm = math.floor(lerp(state.rpmRollFrom, state.rpmRollTo, eased) + 0.5)
   end
+
+  local centerX = viewportX + viewportW * 0.5
   love.graphics.setFont(rpmFont)
   local rpmText = tostring(shownRpm)
   setColorScaled(swatch.bright, 1, 1)
-  drawText(rpmText, viewportX + viewportW * 0.5 - rpmFont:getWidth(rpmText) * 0.5, rpmY)
+  drawText(rpmText, centerX - rpmFont:getWidth(rpmText) * 0.5, rpmY)
   love.graphics.setFont(font)
   local rpmLabelY = rpmY + rpmFont:getHeight() - math.floor(8 * uiScale)
-  local rpmLabel = "rpm"
   setColorScaled(palette.text, 1, 0.9)
-  drawText(rpmLabel, viewportX + viewportW * 0.5 - font:getWidth(rpmLabel) * 0.5, rpmLabelY)
+  drawText("rpm", centerX - font:getWidth("rpm") * 0.5, rpmLabelY)
+  ui.feedbackAnchors.rpm.x = centerX
+  ui.feedbackAnchors.rpm.y = rpmY + math.floor(rpmFont:getHeight() * 0.3)
 
   local objectiveText = string.format("objective: get to %d rpm", state.objectiveRpm)
   local objectiveX = viewportX + viewportW - font:getWidth(objectiveText) - math.floor(10 * uiScale)
@@ -1591,45 +2386,50 @@ local function drawHud()
     drawText(rewardText, viewportX + viewportW - font:getWidth(rewardText) - math.floor(10 * uiScale), objectiveY + lineH * 3 + math.floor(6 * uiScale))
   end
 
-  local endBtn = ui.endTurnBtn
-  endBtn.w = math.floor(Config.END_TURN_W * uiScale)
-  endBtn.h = math.floor(Config.END_TURN_H * uiScale)
-  endBtn.x = viewportX + viewportW - endBtn.w - math.floor(10 * uiScale)
-  endBtn.y = viewportY + viewportH - endBtn.h - math.floor(12 * uiScale)
-  local canEndTurn = not state.runComplete
-  local endHovered = pointInRect(mouseX, mouseY, endBtn)
-  local endAlpha = canEndTurn and 1 or 0.45
-  setColorScaled(swatch.brightest, 1, (endHovered and 1 or 0.92) * endAlpha)
-  love.graphics.rectangle("fill", endBtn.x, endBtn.y, endBtn.w, endBtn.h)
-  setColorScaled(swatch.darkest, 1, (endHovered and 1 or 0.88) * endAlpha)
-  love.graphics.rectangle("line", endBtn.x, endBtn.y, endBtn.w, endBtn.h)
-  setColorScaled(swatch.darkest, 1, endAlpha)
-  local endLabel = "end turn"
-  drawText(endLabel, endBtn.x + math.floor((endBtn.w - font:getWidth(endLabel)) * 0.5), endBtn.y + math.floor((endBtn.h - lineH) * 0.5))
-
   local cardW = math.floor(Config.CARD_W * uiScale)
   local cardH = math.floor(Config.CARD_H * uiScale)
   local cardGap = math.floor(Config.CARD_GAP * uiScale)
-  local handCount = #state.hand
-  local handW = handCount > 0 and (handCount * cardW + (handCount - 1) * cardGap) or 0
   local cardY = viewportY + viewportH - cardH - math.floor(12 * uiScale)
-  local startX = viewportX + math.floor((viewportW - handW) * 0.5)
   local fixedSlots = Config.STARTING_HAND_SIZE
   local fixedHandW = fixedSlots * cardW + (fixedSlots - 1) * cardGap
   local fixedStartX = viewportX + math.floor((viewportW - fixedHandW) * 0.5)
 
-  local turnText = string.format("turn %d/%d", state.turn, state.maxTurns)
-  local energyText = string.format("energy %d", state.energy)
-  local heatText = string.format("heat %d/%d", state.heat, state.heatCap)
-  local infoY = cardY - lineH * 3 - math.floor(12 * uiScale)
-  setColorScaled(palette.text, 1, 0.92)
-  drawText(turnText, viewportX + viewportW * 0.5 - font:getWidth(turnText) * 0.5, infoY)
-  drawText(energyText, viewportX + viewportW * 0.5 - font:getWidth(energyText) * 0.5, infoY + lineH + math.floor(2 * uiScale))
-  drawText(heatText, viewportX + viewportW * 0.5 - font:getWidth(heatText) * 0.5, infoY + lineH * 2 + math.floor(4 * uiScale))
+  local statsTitleY = cardY - lineH * 2 - math.floor(14 * uiScale)
+  local statsValueY = statsTitleY + lineH + math.floor(2 * uiScale)
+  local statColW = fixedHandW / 3
+  local turnX = fixedStartX + statColW * 0.5
+  local energyX = fixedStartX + statColW * 1.5
+  local heatX = fixedStartX + statColW * 2.5
+
+  local turnTitle = "turn"
+  local energyTitle = "energy"
+  local heatTitle = "heat"
+  local turnValue = string.format("%d/%d", micro.displayTurn, state.maxTurns)
+  local energyValue = tostring(micro.displayEnergy)
+  local heatValue = string.format("%d/%d", micro.displayHeat, state.heatCap)
+
+  setColorScaled(palette.text, 1, 0.82)
+  drawText(turnTitle, turnX - font:getWidth(turnTitle) * 0.5, statsTitleY)
+  drawText(energyTitle, energyX - font:getWidth(energyTitle) * 0.5, statsTitleY)
+  drawText(heatTitle, heatX - font:getWidth(heatTitle) * 0.5, statsTitleY)
+  setColorScaled(palette.text, 1, 0.95)
+  drawText(turnValue, turnX - font:getWidth(turnValue) * 0.5, statsValueY)
+  drawText(energyValue, energyX - font:getWidth(energyValue) * 0.5, statsValueY)
+  drawText(heatValue, heatX - font:getWidth(heatValue) * 0.5, statsValueY)
+
+  local anchorY = statsTitleY - lineH - math.floor(10 * uiScale)
+  ui.feedbackAnchors.turn.x = turnX
+  ui.feedbackAnchors.turn.y = anchorY
+  ui.feedbackAnchors.energy.x = energyX
+  ui.feedbackAnchors.energy.y = anchorY
+  ui.feedbackAnchors.heat.x = heatX
+  ui.feedbackAnchors.heat.y = anchorY
 
   local pileW = math.floor(94 * uiScale)
   local pileH = math.floor(56 * uiScale)
-  ui.drawPile.x = fixedStartX - pileW - math.floor(12 * uiScale)
+  local reshuffleT = clamp(micro.reshuffleCue / 0.16, 0, 1)
+  local reshuffleJitter = math.sin((1 - reshuffleT) * 52) * (4 * uiScale) * reshuffleT
+  ui.drawPile.x = fixedStartX - pileW - math.floor(12 * uiScale) + reshuffleJitter
   ui.drawPile.y = cardY + math.floor((cardH - pileH) * 0.5)
   ui.drawPile.w = pileW
   ui.drawPile.h = pileH
@@ -1644,49 +2444,145 @@ local function drawHud()
   setColorScaled(swatch.darkest, 1, 0.95)
   love.graphics.rectangle("line", ui.drawPile.x, ui.drawPile.y, ui.drawPile.w, ui.drawPile.h)
   love.graphics.rectangle("line", ui.discardPile.x, ui.discardPile.y, ui.discardPile.w, ui.discardPile.h)
+  if reshuffleT > 0 then
+    setColorScaled(swatch.bright, 1, 0.75 * reshuffleT)
+    love.graphics.rectangle("line", ui.drawPile.x - 1, ui.drawPile.y - 1, ui.drawPile.w + 2, ui.drawPile.h + 2)
+  end
   setColorScaled(swatch.darkest, 1, 0.95)
   drawText("draw", ui.drawPile.x + math.floor(8 * uiScale), ui.drawPile.y + math.floor(5 * uiScale))
   drawText(tostring(#state.drawPile), ui.drawPile.x + math.floor(8 * uiScale), ui.drawPile.y + math.floor(5 * uiScale) + lineH)
   drawText("discard", ui.discardPile.x + math.floor(8 * uiScale), ui.discardPile.y + math.floor(5 * uiScale))
   drawText(tostring(#state.discardPile), ui.discardPile.x + math.floor(8 * uiScale), ui.discardPile.y + math.floor(5 * uiScale) + lineH)
 
+  local endBtn = ui.endTurnBtn
+  endBtn.w = math.floor(Config.END_TURN_W * uiScale)
+  endBtn.h = math.floor(Config.END_TURN_H * uiScale)
+  endBtn.x = viewportX + viewportW - endBtn.w - math.floor(10 * uiScale)
+  endBtn.y = viewportY + viewportH - endBtn.h - math.floor(12 * uiScale)
+  local canEndTurn = (not state.runComplete) and (not micro.lockInput)
+  local endHovered = canEndTurn and pointInRect(mouseX, mouseY, endBtn)
+  local endAlpha = canEndTurn and 1 or 0.45
+  setColorScaled(swatch.brightest, 1, (endHovered and 1 or 0.92) * endAlpha)
+  love.graphics.rectangle("fill", endBtn.x, endBtn.y, endBtn.w, endBtn.h)
+  setColorScaled(swatch.darkest, 1, (endHovered and 1 or 0.88) * endAlpha)
+  love.graphics.rectangle("line", endBtn.x, endBtn.y, endBtn.w, endBtn.h)
+  setColorScaled(swatch.darkest, 1, endAlpha)
+  local endLabel = "end turn"
+  drawText(endLabel, endBtn.x + math.floor((endBtn.w - font:getWidth(endLabel)) * 0.5), endBtn.y + math.floor((endBtn.h - lineH) * 0.5))
+
+  local sequence = micro.sequence
+  local handCards = state.hand
+  local handMode = "live"
+  if sequence and sequence.type == "card_play" then
+    handCards = sequence.handSnapshot
+    handMode = "card_play"
+  elseif sequence and sequence.type == "turn_transition" then
+    if sequence.phase == "discard_hand" then
+      handCards = sequence.handSnapshot
+      handMode = "discard"
+    elseif sequence.phase == "draw_hand" then
+      handCards = state.hand
+      handMode = "draw"
+    else
+      handCards = {}
+      handMode = "none"
+    end
+  end
+
+  local handCount = #handCards
+  local handW = handCount > 0 and (handCount * cardW + (handCount - 1) * cardGap) or 0
+  local startX = viewportX + math.floor((viewportW - handW) * 0.5)
   local hoveredTooltipLines
   local hoveredTooltipBtn
   local moonCount = getRunMoonBodyCount()
+  local interactive = (handMode == "live") and (not micro.lockInput) and (not state.runComplete)
+
   for i = #ui.cardButtons, handCount + 1, -1 do
     ui.cardButtons[i] = nil
     state.cardHoverLift[i] = nil
   end
+
   for i = 1, handCount do
-    local cardId = state.hand[i]
+    local cardId = handCards[i]
     local cardDef = Config.CARD_DEFS[cardId]
     local btn = ui.cardButtons[i] or {}
     ui.cardButtons[i] = btn
-    local hoverLift = state.cardHoverLift[i] or 0
-    btn.x = startX + (i - 1) * (cardW + cardGap)
-    btn.y = cardY - hoverLift
+    local fanY = handFanYOffset(i, handCount, uiScale)
+    local finalX = startX + (i - 1) * (cardW + cardGap)
+    local finalY = cardY + fanY
+    local drawX = finalX
+    local drawY = finalY
+    local alpha = 1
+    local hovered = false
+    local skipDraw = false
+
+    if handMode == "card_play" then
+      if i == sequence.handIndex then
+        skipDraw = true
+      else
+        alpha = 0.62
+      end
+    elseif handMode == "discard" then
+      local p = smoothstep(1 - clamp(sequence.timer / math.max(0.001, sequence.discardDuration), 0, 1))
+      local targetX = ui.discardPile.x + (ui.discardPile.w - cardW) * 0.5
+      local targetY = ui.discardPile.y + (ui.discardPile.h - cardH) * 0.5
+      drawX = lerp(finalX, targetX, p)
+      drawY = lerp(finalY, targetY, p)
+      alpha = 1 - p * 0.55
+    elseif handMode == "draw" then
+      local delay = (i - 1) * sequence.drawStagger
+      local t = clamp((sequence.drawElapsed - delay) / math.max(0.001, sequence.drawItemDuration), 0, 1)
+      local eased = smoothstep(t)
+      local startCardX = ui.drawPile.x + (ui.drawPile.w - cardW) * 0.5
+      local startCardY = ui.drawPile.y + (ui.drawPile.h - cardH) * 0.5
+      drawX = lerp(startCardX, finalX, eased)
+      drawY = lerp(startCardY, finalY, eased)
+      alpha = t
+      if t <= 0 then
+        skipDraw = true
+      end
+    end
+
+    btn.x = drawX
+    btn.y = drawY
     btn.w = cardW
     btn.h = cardH
     btn.cardId = cardId
     btn.index = i
-    local hovered = pointInRect(mouseX, mouseY, btn)
-    local targetLift = hovered and (6 * uiScale) or 0
-    hoverLift = hoverLift + (targetLift - hoverLift) * 0.22
-    state.cardHoverLift[i] = hoverLift
-    btn.y = cardY - hoverLift
-    hovered = pointInRect(mouseX, mouseY, btn)
+
+    if interactive then
+      local hoverLift = state.cardHoverLift[i] or 0
+      hovered = pointInRect(mouseX, mouseY, btn)
+      local targetLift = hovered and (6 * uiScale) or 0
+      hoverLift = hoverLift + (targetLift - hoverLift) * 0.22
+      state.cardHoverLift[i] = hoverLift
+      btn.y = drawY - hoverLift
+      hovered = pointInRect(mouseX, mouseY, btn)
+    else
+      state.cardHoverLift[i] = 0
+    end
+
     local cardCost = currentCardCost(cardDef)
+    if handMode == "card_play" and i == sequence.handIndex then
+      cardCost = sequence.cost
+    end
     local moonBonus = previewMoonRpmBonus(cardDef)
-    local playable = (not state.runComplete) and cardDef and (state.energy >= cardCost)
-    local alpha = playable and 1 or 0.45
-    drawCardFace(btn, cardDef, {
-      hovered = hovered,
-      alpha = alpha,
-      cost = cardCost,
-      moonCount = moonCount,
-      moonBonus = moonBonus,
-    })
-    if hovered and cardDef then
+    local playable = cardDef and (state.energy >= cardCost) and (not state.runComplete)
+    local cardAlpha = alpha
+    if handMode == "live" then
+      cardAlpha = cardAlpha * (playable and 1 or 0.45)
+    end
+    if not skipDraw and cardAlpha > 0 and cardDef then
+      drawCardFace(btn, cardDef, {
+        hovered = hovered,
+        alpha = cardAlpha,
+        cost = cardCost,
+        moonCount = moonCount,
+        moonBonus = moonBonus,
+      })
+    end
+
+    if interactive and hovered and cardDef then
       hoveredTooltipBtn = btn
       hoveredTooltipLines = {
         {pre = cardDef.tooltip or "", hi = "", post = ""},
@@ -1694,7 +2590,48 @@ local function drawHud()
       }
     end
   end
+
+  if handMode == "card_play" and sequence and sequence.cardDef then
+    local i = sequence.handIndex
+    local fanY = handFanYOffset(i, handCount, uiScale)
+    local baseX = startX + (i - 1) * (cardW + cardGap)
+    local baseY = cardY + fanY
+    local focusT = 1
+    if sequence.phase == "commit" then
+      focusT = smoothstep(1 - clamp(sequence.timer / math.max(0.001, sequence.commitDuration), 0, 1))
+    end
+
+    local ghostScale = 1 + 0.05 * focusT
+    local ghostX = baseX
+    local ghostY = baseY - 8 * uiScale * focusT
+    if sequence.phase == "settle" then
+      local p = smoothstep(1 - clamp(sequence.timer / math.max(0.001, sequence.settleDuration), 0, 1))
+      local targetX = ui.discardPile.x + (ui.discardPile.w - cardW) * 0.5
+      local targetY = ui.discardPile.y + (ui.discardPile.h - cardH) * 0.5
+      ghostX = lerp(baseX, targetX, p)
+      ghostY = lerp(baseY - 8 * uiScale, targetY, p)
+      ghostScale = lerp(1.05, 0.90, p)
+    end
+
+    local ghostW = cardW * ghostScale
+    local ghostH = cardH * ghostScale
+    local ghostBtn = {
+      x = ghostX - (ghostW - cardW) * 0.5,
+      y = ghostY - (ghostH - cardH) * 0.5,
+      w = ghostW,
+      h = ghostH,
+    }
+    drawCardFace(ghostBtn, sequence.cardDef, {
+      hovered = true,
+      alpha = 1,
+      cost = sequence.cost,
+      moonCount = moonCount,
+      moonBonus = previewMoonRpmBonus(sequence.cardDef),
+    })
+  end
+
   drawHoverTooltip(hoveredTooltipLines, hoveredTooltipBtn, uiScale, lineH, true)
+  drawFloatingTexts()
 end
 
 function drawMainMenu()
@@ -2490,7 +3427,10 @@ function love.update(dt)
   updateUpgradeFx(dt)
   state.time = state.time + dt
   state.planetBounceTime = math.max(0, state.planetBounceTime - dt)
-  state.rpmRollTimer = math.max(0, state.rpmRollTimer - dt)
+  if not micro.rpmHold then
+    state.rpmRollTimer = math.max(0, state.rpmRollTimer - dt)
+  end
+  updateMicroInteractions(dt)
 
   if runtime.orbiters then
     runtime.orbiters:update(dt)
@@ -2505,7 +3445,7 @@ function love.update(dt)
     end
   end
 
-  if state.screen == "run" and state.runComplete then
+  if state.screen == "run" and state.runComplete and not micro.lockInput then
     switchScreen("end_game")
   end
 end
@@ -2579,6 +3519,10 @@ function love.mousepressed(x, y, button)
     end
     return
   elseif state.screen ~= "run" then
+    return
+  end
+
+  if micro.lockInput then
     return
   end
 
@@ -2663,6 +3607,7 @@ function love.draw()
 
   drawSelectedOrbit(false)
   drawSelectedLightOrbit(false)
+  drawMachineGuides(false)
   drawOrbiterTooltipConnector(false)
   drawLightSource(false)
 
@@ -2682,6 +3627,7 @@ function love.draw()
   drawOrbiterTooltipConnector(true)
   drawSelectedOrbit(true)
   drawSelectedLightOrbit(true)
+  drawMachineGuides(true)
 
   for i = firstFront, #renderOrbiters do
     drawOrbiterByKind(renderOrbiters[i])
