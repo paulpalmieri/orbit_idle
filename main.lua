@@ -10,8 +10,8 @@ local canvas
 local uiFont
 local uiScreenFont
 local uiScreenFontSize = 0
-local rpmDisplayFont
-local rpmDisplayFontSize = 0
+local topDisplayFont
+local topDisplayFontSize = 0
 local cardFont
 local cardFontSize = 0
 local bgMusic
@@ -58,32 +58,22 @@ local state = {
   drawPile = {},
   discardPile = {},
   cardHoverLift = {},
-  turn = 1,
-  maxTurns = Config.MAX_TURNS,
-  energy = Config.TURN_ENERGY,
-  objectiveRpm = Config.OBJECTIVE_RPM,
-  coreRpm = Config.CORE_BASE_RPM,
+  epoch = 1,
+  maxEpochs = Config.MAX_EPOCHS,
+  energy = Config.EPOCH_ENERGY,
   heat = 0,
   heatCap = Config.HEAT_CAP,
-  highestRpm = Config.CORE_BASE_RPM,
-  rewardRpm = 0,
-  globalRunRpmBuff = 0,
-  globalTurnRpmBuff = 0,
-  nextBodyRpmBonus = 0,
-  nextBodyHeatReduction = 0,
-  handRpmBonus = {},
+  points = 0,
+  rewardPoints = 0,
   runOutcome = "",
   runComplete = false,
   runWon = false,
   runRewardClaimed = false,
+  phase = "planning",
+  inputLocked = false,
   currency = 100,
   deckList = nil,
   inventory = {},
-  lastTurnPulsePlayed = false,
-  rpmRollTimer = 0,
-  rpmRollDuration = 0.30,
-  rpmRollFrom = 0,
-  rpmRollTo = 0,
 }
 
 local ui = {
@@ -100,10 +90,11 @@ local ui = {
   endGameMenuBtn = {x = 0, y = 0, w = 0, h = 0},
   endGameReplayBtn = {x = 0, y = 0, w = 0, h = 0},
   feedbackAnchors = {
-    turn = {x = 0, y = 0},
+    epoch = {x = 0, y = 0},
     energy = {x = 0, y = 0},
     heat = {x = 0, y = 0},
-    rpm = {x = 0, y = 0},
+    points = {x = 0, y = 0},
+    systemOpe = {x = 0, y = 0},
   },
 }
 
@@ -113,13 +104,12 @@ local micro = {
   lockInput = false,
   sequence = nil,
   floatingTexts = {},
+  worldFloatingTexts = {},
   floatingLane = {},
   floatingQueueAt = {},
   displayEnergy = state.energy,
   displayHeat = state.heat,
-  displayTurn = state.turn,
-  rpmHold = false,
-  rpmHoldValue = 0,
+  displayEpoch = state.epoch,
   summonEntries = {},
   trailBoost = 0,
   orbitLineBoost = 0,
@@ -380,7 +370,7 @@ local function setLitColorDirect(r, g, b, lightScale, alpha)
 end
 
 local function drawText(text, x, y)
-  love.graphics.print(text, math.floor(x + 0.5), math.floor(y + 0.5))
+  love.graphics.print(tostring(text or ""):lower(), math.floor(x + 0.5), math.floor(y + 0.5))
 end
 
 local function drawOrbitIcon(x, y, size, alphaScale)
@@ -500,26 +490,35 @@ local function toScreenSpace(gx, gy)
   return offsetX + gx * scale, offsetY + gy * scale
 end
 
+local function patchFontWidth(font)
+  if not font then return end
+  local old = font.getWidth
+  font.getWidth = function(self, text)
+    return old(self, tostring(text or ""):lower())
+  end
+  return font
+end
+
 local function getUiScreenFont()
   local uiScale = scale >= 1 and scale or 1
   local size = math.max(1, math.floor(Config.UI_FONT_SIZE * uiScale + 0.5))
   if not uiScreenFont or uiScreenFontSize ~= size then
-    uiScreenFont = love.graphics.newFont("font_gothic.ttf", size, "mono")
+    uiScreenFont = patchFontWidth(love.graphics.newFont("font_gothic.ttf", size, "mono"))
     uiScreenFont:setFilter("nearest", "nearest")
     uiScreenFontSize = size
   end
   return uiScreenFont
 end
 
-function getRpmDisplayFont()
+function getTopDisplayFont()
   local uiScale = scale >= 1 and scale or 1
   local size = math.max(1, math.floor(Config.UI_FONT_SIZE * uiScale * 3.1 + 0.5))
-  if not rpmDisplayFont or rpmDisplayFontSize ~= size then
-    rpmDisplayFont = love.graphics.newFont("font_gothic.ttf", size, "mono")
-    rpmDisplayFont:setFilter("nearest", "nearest")
-    rpmDisplayFontSize = size
+  if not topDisplayFont or topDisplayFontSize ~= size then
+    topDisplayFont = patchFontWidth(love.graphics.newFont("font_gothic.ttf", size, "mono"))
+    topDisplayFont:setFilter("nearest", "nearest")
+    topDisplayFontSize = size
   end
-  return rpmDisplayFont
+  return topDisplayFont
 end
 
 local function getCardFont(cardHeight)
@@ -528,7 +527,7 @@ local function getCardFont(cardHeight)
   local fitSize = clamp(math.floor(cardHeight * 0.16 + 0.5), 10, 48)
   local size = math.min(uiSize, fitSize)
   if not cardFont or cardFontSize ~= size then
-    cardFont = love.graphics.newFont("font_gothic.ttf", size, "mono")
+    cardFont = patchFontWidth(love.graphics.newFont("font_gothic.ttf", size, "mono"))
     cardFont:setFilter("nearest", "nearest")
     cardFontSize = size
   end
@@ -607,30 +606,19 @@ local function collectAllOrbiters()
   return runtime.cardRun:collectAllOrbiters()
 end
 
-local function computeTotalRpm()
+local function computeSystemOpe()
   if not runtime.cardRun then
     local total = 0
     local orbiters = state.renderOrbiters or {}
     for i = 1, #orbiters do
       local orbiter = orbiters[i]
       if orbiter and orbiter.cardBody then
-        total = total + math.max(0, tonumber(orbiter.boardRpm) or 0)
+        total = total + math.max(0, tonumber(orbiter.baseOpe) or 0)
       end
     end
     return total
   end
-  return runtime.cardRun:computeTotalRpm()
-end
-
-local function updateHighestRpm()
-  if not runtime.cardRun then
-    local current = math.floor(computeTotalRpm() + 0.5)
-    if current > state.highestRpm then
-      state.highestRpm = current
-    end
-    return current
-  end
-  return runtime.cardRun:updateHighestRpm()
+  return runtime.cardRun:computeSystemOpe()
 end
 
 local function triggerGravityPulse()
@@ -648,12 +636,13 @@ local function copyList(list)
 end
 
 local function syncMicroDisplayFromState()
-  if micro.lockInput then
+  if micro.sequence then
     return
   end
+  micro.lockInput = state.inputLocked == true
   micro.displayEnergy = state.energy
   micro.displayHeat = state.heat
-  micro.displayTurn = state.turn
+  micro.displayEpoch = state.epoch
 end
 
 local function beginFloatingText(anchorId, label, color, opts)
@@ -672,11 +661,26 @@ local function beginFloatingText(anchorId, label, color, opts)
   micro.floatingTexts[#micro.floatingTexts + 1] = {
     x = anchor.x + laneOffset,
     y = anchor.y + (opts.yOffset or (-14 * math.max(scale, 1))),
-    text = string.lower(tostring(label or "")),
+    text = tostring(label or ""),
     color = color or swatch.brightest,
     age = -delay,
     life = opts.life or 4.00,
     rise = opts.rise or (42 * math.max(scale, 1)),
+  }
+end
+
+local function beginWorldFloatingText(worldX, worldY, worldZ, label, color, opts)
+  opts = opts or {}
+  micro.worldFloatingTexts[#micro.worldFloatingTexts + 1] = {
+    worldX = worldX,
+    worldY = worldY,
+    worldZ = worldZ or 0,
+    yOffset = opts.yOffset or (22 * math.max(scale, 1)),
+    text = tostring(label or ""),
+    color = color or swatch.brightest,
+    age = -(opts.delay or 0),
+    life = opts.life or 2.10,
+    rise = opts.rise or (56 * math.max(scale, 1)),
   }
 end
 
@@ -685,16 +689,16 @@ local function cardEffectClass(cardDef)
     return "generic"
   end
   local effectType = cardDef.effect and cardDef.effect.type or "none"
-  if effectType == "vent" then
+  if effectType == "vent_and_draw" then
     return "vent"
   end
-  if effectType == "global_turn_rpm" or effectType == "resonator_turn_burst" then
+  if effectType == "next_body_or_satellite_twice" or effectType == "grant_this_epoch_ope" then
     return "burst"
   end
-  if effectType == "global_run_rpm" or effectType == "precision_target_run_rpm" then
+  if effectType == "attach_satellite" then
     return "permanent"
   end
-  if effectType == "hand_rpm_buff" or effectType == "next_body_modifier" or effectType == "reduce_end_turn_heat" then
+  if effectType == "draw_and_free_satellite" then
     return "support"
   end
   if cardDef.orbitClass == "Heavy" or (cardDef.spawnCount or 1) > 1 then
@@ -857,7 +861,7 @@ end
 local currentCardCost
 
 local function beginCardPlaySequence(handIndex)
-  if not runtime.cardRun or micro.lockInput or state.runComplete then
+  if not runtime.cardRun or micro.lockInput or state.runComplete or state.phase ~= "planning" then
     return false
   end
 
@@ -891,56 +895,39 @@ local function beginCardPlaySequence(handIndex)
     settleDuration = timing.settle,
     predictedHeatDelta = estimateCardHeatDelta(cardDef),
     beforeHeat = state.heat,
-    beforeRpm = math.floor(computeTotalRpm() + 0.5),
+    beforeOpe = math.floor(computeSystemOpe() + 0.5),
     beforeOrbiters = buildOrbiterSet(collectAllOrbiters()),
-    afterRpm = math.floor(computeTotalRpm() + 0.5),
+    afterOpe = math.floor(computeSystemOpe() + 0.5),
     actualHeatDelta = 0,
-    actualRpmDelta = 0,
+    actualOpeDelta = 0,
     effectDuration = timing.effect,
     timing = timing,
   }
-  micro.rpmHold = false
   return true
 end
 
 local function finalizeCardPlaySequence()
-  micro.rpmHold = false
   micro.sequence = nil
-  micro.lockInput = false
+  micro.lockInput = state.inputLocked == true
   micro.displayEnergy = state.energy
   micro.displayHeat = state.heat
+  micro.displayEpoch = state.epoch
 end
 
-local function beginTurnTransitionSequence()
-  if not runtime.cardRun or micro.lockInput or state.runComplete then
+local function beginEpochSimulation()
+  if not runtime.cardRun or micro.lockInput or state.runComplete or state.phase ~= "planning" then
     return false
   end
-  micro.lockInput = true
-  micro.sequence = {
-    type = "turn_transition",
-    phase = "discard_hand",
-    timer = math.max(0.17, 0.13 + #state.hand * 0.022),
-    discardDuration = math.max(0.17, 0.13 + #state.hand * 0.022),
-    endEffectsDuration = 0.08,
-    heatDuration = 0.10,
-    settleDuration = 0.10,
-    turnLabelDuration = 0.12,
-    handSnapshot = copyList(state.hand),
-    endTurnHeat = 0,
-    drawElapsed = 0,
-    drawDuration = 0,
-    drawTail = 0.05,
-    drawStagger = 0.04,
-    drawItemDuration = 0.18,
-    reshuffled = false,
-    refillTick = 0.05,
-    refillAccumulator = 0,
-  }
-  return true
+  local ended = runtime.cardRun:endEpoch()
+  if ended then
+    micro.lockInput = true
+    beginFloatingText("epoch", "Epoch " .. tostring(state.epoch) .. " running", swatch.brightest, {life = 0.9, rise = 20})
+  end
+  return ended
 end
 
-local function endPlayerTurn()
-  return beginTurnTransitionSequence()
+local function endEpochFromUi()
+  return beginEpochSimulation()
 end
 
 currentCardCost = function(cardDef)
@@ -958,10 +945,10 @@ local function startCardRun()
   if runtime.cardRun then
     runtime.cardRun:startCardRun()
   end
-  micro.lockInput = false
+  micro.lockInput = state.inputLocked == true
   micro.sequence = nil
-  micro.rpmHold = false
   micro.floatingTexts = {}
+  micro.worldFloatingTexts = {}
   micro.floatingLane = {}
   micro.floatingQueueAt = {}
   micro.summonEntries = {}
@@ -972,15 +959,7 @@ local function startCardRun()
   micro.reshuffleCue = 0
   micro.displayEnergy = state.energy
   micro.displayHeat = state.heat
-  micro.displayTurn = state.turn
-end
-
-local function finalizeTurnTransitionSequence()
-  micro.sequence = nil
-  micro.lockInput = false
-  micro.displayEnergy = state.energy
-  micro.displayHeat = state.heat
-  micro.displayTurn = state.turn
+  micro.displayEpoch = state.epoch
 end
 
 local function updateCardPlaySequence(dt)
@@ -1032,10 +1011,8 @@ local function updateCardPlaySequence(dt)
 
     triggerMachineFxForCard(ctx.cardDef)
 
-    ctx.afterRpm = math.floor(computeTotalRpm() + 0.5)
-    ctx.actualRpmDelta = ctx.afterRpm - ctx.beforeRpm
-    micro.rpmHold = true
-    micro.rpmHoldValue = ctx.beforeRpm
+    ctx.afterOpe = math.floor(computeSystemOpe() + 0.5)
+    ctx.actualOpeDelta = ctx.afterOpe - ctx.beforeOpe
 
     ctx.phase = "effect"
     ctx.timer = ctx.effectDuration
@@ -1043,12 +1020,11 @@ local function updateCardPlaySequence(dt)
   end
 
   if ctx.phase == "effect" then
-    micro.rpmHold = false
-    if ctx.actualRpmDelta ~= 0 then
-      local sign = ctx.actualRpmDelta > 0 and "+" or ""
-      beginFloatingText("rpm", sign .. tostring(ctx.actualRpmDelta) .. " RPM", swatch.brightest)
+    if ctx.actualOpeDelta ~= 0 then
+      local sign = ctx.actualOpeDelta > 0 and "+" or ""
+      beginFloatingText("systemOpe", sign .. tostring(ctx.actualOpeDelta) .. " OPE", swatch.brightest)
     else
-      beginFloatingText("rpm", tostring(ctx.afterRpm) .. " RPM", swatch.brightest)
+      beginFloatingText("systemOpe", tostring(ctx.afterOpe) .. " OPE", swatch.brightest)
     end
     ctx.phase = "result"
     ctx.timer = ctx.resultDuration
@@ -1064,120 +1040,20 @@ local function updateCardPlaySequence(dt)
   finalizeCardPlaySequence()
 end
 
-local function updateTurnTransitionSequence(dt)
-  local ctx = micro.sequence
-  if not ctx or ctx.type ~= "turn_transition" then
-    return
-  end
-
-  if ctx.phase == "energy_refill" then
-    ctx.refillAccumulator = ctx.refillAccumulator + dt
-    while ctx.refillAccumulator >= ctx.refillTick and micro.displayEnergy < state.energy do
-      ctx.refillAccumulator = ctx.refillAccumulator - ctx.refillTick
-      micro.displayEnergy = micro.displayEnergy + 1
-      beginFloatingText("energy", "+1", swatch.brightest)
-    end
-    if micro.displayEnergy >= state.energy then
-      ctx.phase = "draw_hand"
-      ctx.drawElapsed = 0
-      local handCount = #state.hand
-      ctx.drawDuration = ctx.drawItemDuration + math.max(0, handCount - 1) * ctx.drawStagger + ctx.drawTail
-      if ctx.reshuffled then
-        micro.reshuffleCue = math.max(micro.reshuffleCue, 0.16)
-      end
-    end
-    return
-  end
-
-  if ctx.phase == "draw_hand" then
-    ctx.drawElapsed = math.min(ctx.drawDuration, ctx.drawElapsed + dt)
-    if ctx.drawElapsed >= ctx.drawDuration then
-      finalizeTurnTransitionSequence()
-    end
-    return
-  end
-
-  ctx.timer = ctx.timer - dt
-  if ctx.timer > 0 then
-    return
-  end
-
-  if ctx.phase == "discard_hand" then
-    if runtime.cardRun then
-      runtime.cardRun:discardCurrentHand()
-    end
-    ctx.phase = "end_effects"
-    ctx.timer = ctx.endEffectsDuration
-    return
-  end
-
-  if ctx.phase == "end_effects" then
-    local beforeHeat = state.heat
-    local heatGain = math.max(0, Config.END_TURN_HEAT_GAIN - (runtime.cardRun and runtime.cardRun:countAnchors() or 0))
-    ctx.endTurnHeat = heatGain
-    if runtime.cardRun then
-      runtime.cardRun:addHeat(heatGain)
-      runtime.cardRun:syncOrbiterSpeedsFromBodies()
-      runtime.cardRun:updateHighestRpm()
-    end
-    micro.displayHeat = state.heat
-    local heatDelta = state.heat - beforeHeat
-    if heatDelta >= 0 then
-      beginFloatingText("heat", string.format("+%d Heat", heatDelta), swatch.bright)
-    else
-      beginFloatingText("heat", string.format("-%d Heat", -heatDelta), swatch.brightest)
-    end
-    ctx.phase = "heat_gain"
-    ctx.timer = ctx.heatDuration
-    return
-  end
-
-  if ctx.phase == "heat_gain" then
-    ctx.phase = "settle"
-    ctx.timer = ctx.settleDuration
-    return
-  end
-
-  if ctx.phase == "settle" then
-    if state.runComplete then
-      finalizeTurnTransitionSequence()
-      return
-    end
-    if state.turn >= state.maxTurns then
-      if runtime.cardRun then
-        runtime.cardRun:finishRun("completed")
-      end
-      finalizeTurnTransitionSequence()
-      return
-    end
-
-    local beforeDraw = #state.drawPile
-    local beforeDiscard = #state.discardPile
-    if runtime.cardRun then
-      runtime.cardRun:beginTurn(state.turn + 1)
-    end
-    ctx.reshuffled = beforeDraw == 0 and beforeDiscard > 0
-    micro.displayTurn = state.turn
-    micro.displayEnergy = 0
-    beginFloatingText("turn", "Turn " .. tostring(state.turn), swatch.brightest)
-    ctx.phase = "turn_label"
-    ctx.timer = ctx.turnLabelDuration
-    return
-  end
-
-  if ctx.phase == "turn_label" then
-    ctx.phase = "energy_refill"
-    ctx.refillAccumulator = 0
-    return
-  end
-end
-
 local function updateMicroInteractions(dt)
   for i = #micro.floatingTexts, 1, -1 do
     local text = micro.floatingTexts[i]
     text.age = text.age + dt
     if text.age >= text.life then
       table.remove(micro.floatingTexts, i)
+    end
+  end
+
+  for i = #micro.worldFloatingTexts, 1, -1 do
+    local text = micro.worldFloatingTexts[i]
+    text.age = text.age + dt
+    if text.age >= text.life then
+      table.remove(micro.worldFloatingTexts, i)
     end
   end
 
@@ -1202,8 +1078,6 @@ local function updateMicroInteractions(dt)
   if micro.sequence then
     if micro.sequence.type == "card_play" then
       updateCardPlaySequence(dt)
-    elseif micro.sequence.type == "turn_transition" then
-      updateTurnTransitionSequence(dt)
     end
   end
 
@@ -1231,29 +1105,10 @@ function startRunFromMenu()
   end
   startCardRun()
   switchScreen("run")
-  micro.lockInput = true
-  micro.displayEnergy = 0
-  micro.sequence = {
-    type = "turn_transition",
-    phase = "turn_label",
-    timer = 0.12,
-    discardDuration = 0.17,
-    endEffectsDuration = 0.08,
-    heatDuration = 0.10,
-    settleDuration = 0.10,
-    turnLabelDuration = 0.12,
-    handSnapshot = {},
-    endTurnHeat = 0,
-    drawElapsed = 0,
-    drawDuration = 0,
-    drawTail = 0.05,
-    drawStagger = 0.04,
-    drawItemDuration = 0.18,
-    reshuffled = false,
-    refillTick = 0.05,
-    refillAccumulator = 0,
-  }
-  beginFloatingText("turn", "Turn " .. tostring(state.turn), swatch.brightest)
+  micro.lockInput = state.inputLocked == true
+  micro.displayEnergy = state.energy
+  micro.displayEpoch = state.epoch
+  beginFloatingText("epoch", "Epoch " .. tostring(state.epoch), swatch.brightest, {life = 0.9, rise = 20})
 end
 
 local function onPlanetClicked()
@@ -1322,6 +1177,21 @@ local function initGameSystems()
       playMenuBuyClickFx()
     end,
     onRunFinished = function(_, _)
+    end,
+    onPayout = function(body, payout, _)
+      if not body then
+        return
+      end
+      beginFloatingText("points", "+" .. tostring(payout), swatch.brightest, {
+        life = 1.6,
+        rise = 42,
+        queueSpacing = 0.10,
+      })
+      beginWorldFloatingText(body.x or cx, body.y or cy, body.z or 0, "+" .. tostring(payout), swatch.brightest, {
+        life = 2.3,
+        rise = 64,
+        yOffset = 28,
+      })
     end,
   })
 end
@@ -1486,6 +1356,10 @@ local function drawSummonEntries(frontPass)
 end
 
 local function drawMachineGuides(frontPass)
+  if state.phase == "simulating" then
+    return
+  end
+
   if micro.orbitLineBoost > 0 and runtime.cardRun then
     local t = clamp(micro.orbitLineBoost / 0.20, 0, 1)
     local orbiters = collectAllOrbiters()
@@ -1634,10 +1508,14 @@ local function trailLengthForLagSeconds(orbiter, lagSeconds)
     return 0
   end
   local radius = math.max(1, orbiter.radius or 1)
-  local lag = math.max(2.0, tonumber(lagSeconds) or 2.0)
+  local lag = math.max(0.05, tonumber(lagSeconds) or 0.05)
   local omega = orbiterAngularVelocity(orbiter)
-  local arcAngle = math.max(0.34, omega * lag)
-  local maxArcTurns = math.max(1.2, tonumber(Config.TRAIL_MAX_ARC_TURNS) or 2.3)
+  local arcAngle = math.max(0.12, omega * lag)
+  local maxArcTurns = math.max(0.35, tonumber(Config.TRAIL_MAX_ARC_TURNS) or 2.3)
+  if state.phase == "simulating" then
+    local simMax = tonumber(Config.TRAIL_MAX_ARC_TURNS_SIMULATION) or 0.75
+    maxArcTurns = math.min(maxArcTurns, math.max(0.2, simMax))
+  end
   local maxArcAngle = Config.TWO_PI * maxArcTurns
   arcAngle = math.min(maxArcAngle, arcAngle)
   return radius * arcAngle
@@ -1922,85 +1800,38 @@ function drawHoverTooltip(lines, anchorBtn, uiScale, lineH, preferLeft)
   end
 end
 
-local function getRunMoonBodyCount()
+local function getRunBodyCount()
   if runtime.cardRun and runtime.cardRun.getBodyCount then
     return runtime.cardRun:getBodyCount()
   end
   return 0
 end
 
-local function previewMoonRpmBonus(cardDef, handIndex)
-  if runtime.cardRun and runtime.cardRun.getCardRpmBonus then
-    return runtime.cardRun:getCardRpmBonus(cardDef, handIndex)
-  end
+local function previewBodyCardBonus(_, _)
   return 0
 end
 
-local function computeCardRpmGain(cardDef, moonCount, moonBonus)
+local function computeCardPreviewYield(cardDef, _, _)
   if not cardDef then
     return 0
   end
-  local bodies = math.max(0, math.floor(moonCount or 0))
-  local bonus = math.max(0, math.floor(moonBonus or 0))
-  local spawnCount = math.max(1, math.floor(tonumber(cardDef.spawnCount) or 1))
-  local baseRpm = math.max(1, math.floor((tonumber(cardDef.rpm) or 0) + bonus))
-  local baseGain = baseRpm * spawnCount
-  local gain = baseGain
-  local bodiesAfterPlay = bodies + spawnCount
-  local effect = cardDef.effect or {}
-
-  if effect.type == "global_run_rpm" then
-    gain = gain + bodiesAfterPlay * math.max(0, math.floor(tonumber(effect.amount) or 0))
-  elseif effect.type == "global_turn_rpm" then
-    gain = gain + bodiesAfterPlay * math.max(0, math.floor(tonumber(effect.amount) or 0))
-  elseif effect.type == "precision_target_run_rpm" then
-    if bodiesAfterPlay > 0 then
-      gain = gain + math.max(0, math.floor(tonumber(effect.amount) or 0))
-    end
-  elseif effect.type == "resonator_turn_burst" then
-    gain = gain + bodiesAfterPlay * math.max(0, math.floor(tonumber(effect.amountPerBody) or 0))
+  if cardDef.type ~= "body" then
+    return 0
   end
-  return math.floor(gain + 0.5)
+  local spawnCount = math.max(1, math.floor(tonumber(cardDef.spawnCount) or 1))
+  local ope = math.max(0, math.floor(tonumber(cardDef.ope) or 0))
+  local yieldPerOrbit = math.max(0, math.floor(tonumber(cardDef.yieldPerOrbit) or 0))
+  return ope * yieldPerOrbit * spawnCount
 end
 
-local function getCardDescriptionParts(cardDef, moonCount, moonBonus, rpmGain)
+local function getCardDescriptionParts(cardDef, _, _, _)
   if not cardDef then
     return "", "", ""
   end
-
-  local effect = cardDef.effect or {}
-  local spawnCount = math.max(1, math.floor(tonumber(cardDef.spawnCount) or 1))
-  local baseRpm = math.max(1, math.floor((tonumber(cardDef.rpm) or 0) + math.max(0, math.floor(moonBonus or 0))))
-  local baseText = "+" .. tostring(baseRpm * spawnCount) .. " rpm"
-  local className = string.lower(cardDef.orbitClass or "body")
-  local summonText = spawnCount == 1
-      and ("summon " .. className .. " ")
-      or ("summon " .. tostring(spawnCount) .. " " .. className .. "s ")
-
-  if effect.type == "none" then
-    return summonText, baseText, ""
-  elseif effect.type == "vent" then
-    return summonText .. baseText .. ", vent ", tostring(effect.amount or 0) .. " heat", ""
-  elseif effect.type == "global_run_rpm" then
-    return summonText .. baseText .. ", all bodies ", "+" .. tostring(effect.amount or 0) .. " run rpm", ""
-  elseif effect.type == "global_turn_rpm" then
-    return summonText .. baseText .. ", all bodies ", "+" .. tostring(effect.amount or 0) .. " turn rpm", ""
-  elseif effect.type == "hand_rpm_buff" then
-    local picks = math.max(1, math.floor(tonumber(effect.picks) or 1))
-    return summonText .. baseText .. ", hand cards ", "+" .. tostring(effect.amount or 0) .. " rpm x" .. tostring(picks), ""
-  elseif effect.type == "precision_target_run_rpm" then
-    return summonText .. baseText .. ", one body ", "+" .. tostring(effect.amount or 0) .. " run rpm", ""
-  elseif effect.type == "next_body_modifier" then
-    local heatDelta = math.floor(tonumber(effect.heat) or 0)
-    local heatText = heatDelta < 0 and tostring(heatDelta) or ("+" .. tostring(heatDelta))
-    return summonText .. baseText .. ", next body ", "+" .. tostring(effect.rpm or 0) .. " rpm " .. heatText .. " heat", ""
-  elseif effect.type == "reduce_end_turn_heat" then
-    return summonText .. baseText .. ", end-turn heat ", "-" .. tostring(effect.amount or 0), ""
-  elseif effect.type == "resonator_turn_burst" then
-    return summonText .. baseText .. ", this turn ", "+" .. tostring(rpmGain - (baseRpm * spawnCount)) .. " burst rpm", ""
-  end
-
-  return "", cardDef.line or (summonText .. baseText), ""
+  local typeText = cardDef.type or "card"
+  local line = cardDef.line or ""
+  local detail = cardDef.tooltip or ""
+  return string.lower(typeText) .. ": ", line, detail
 end
 
 local function trimTextToWidth(text, maxWidth, font)
@@ -2192,10 +2023,10 @@ local function drawCardFace(btn, cardDef, opts)
   setColorScaled(swatch.bright, 1, 0.98 * alpha)
   drawText(tostring(cost), x + pad, topY)
 
-  local rpmGain = computeCardRpmGain(cardDef, moonCount, moonBonus)
-  local rpmText = (rpmGain >= 0 and "+" or "") .. tostring(rpmGain) .. " rpm"
+  local previewYield = computeCardPreviewYield(cardDef, moonCount, moonBonus)
+  local yieldText = (previewYield >= 0 and "+" or "") .. tostring(previewYield) .. " yld"
   setColorScaled(swatch.brightest, 1, 0.98 * alpha)
-  drawText(rpmText, x + w - pad - cardLocalFont:getWidth(rpmText), topY)
+  drawText(yieldText, x + w - pad - cardLocalFont:getWidth(yieldText), topY)
 
   local moonRadius = math.max(6, math.floor(math.min(w * 0.22, h * 0.16)))
   local moonX = x + math.floor(w * 0.5)
@@ -2209,7 +2040,7 @@ local function drawCardFace(btn, cardDef, opts)
   end
   local descriptionBottom = footerY and (footerY - math.max(3, math.floor(h * 0.03))) or (y + h - pad)
   local maxDescriptionLines = math.max(1, math.floor((descriptionBottom - descriptionY) / math.max(1, lineH)))
-  local pre, hi, post = getCardDescriptionParts(cardDef, moonCount, moonBonus, rpmGain)
+  local pre, hi, post = getCardDescriptionParts(cardDef, moonCount, moonBonus, previewYield)
   drawCardDescriptionWrapped(pre, hi, post, x + pad, descriptionY, innerW, maxDescriptionLines, lineH, alpha)
 
   if footerText ~= "" then
@@ -2270,6 +2101,23 @@ end
 
 local function drawFloatingTexts()
   local font = love.graphics.getFont()
+  for i = 1, #micro.worldFloatingTexts do
+    local entry = micro.worldFloatingTexts[i]
+    if entry.age >= 0 then
+      local t = clamp(entry.age / math.max(0.001, entry.life), 0, 1)
+      local eased = smoothstep(t)
+      local alpha = 1 - eased
+      local gx, gy = projectWorldPoint(entry.worldX, entry.worldY, entry.worldZ)
+      gx = (gx - cx) * zoom + cx
+      gy = (gy - cy) * zoom + cy
+      local sx, sy = toScreenSpace(gx, gy)
+      local x = sx - font:getWidth(entry.text) * 0.5
+      local y = sy - entry.yOffset - entry.rise * eased
+      setColorScaled(entry.color, 1, alpha)
+      drawText(entry.text, x, y)
+    end
+  end
+
   for i = 1, #micro.floatingTexts do
     local entry = micro.floatingTexts[i]
     if entry.age >= 0 then
@@ -2294,47 +2142,27 @@ local function drawHud()
   local viewportW = Config.GAME_W * scale
   local viewportH = Config.GAME_H * scale
 
-  local totalRpm = computeTotalRpm()
-  local rpmInt = math.floor(totalRpm + 0.5)
-  local rpmFont = getRpmDisplayFont()
-  local rpmY = viewportY + math.floor(4 * uiScale)
-  local shownRpm = rpmInt
-  if micro.rpmHold then
-    shownRpm = micro.rpmHoldValue
-  elseif state.rpmRollTimer > 0 and state.rpmRollFrom ~= state.rpmRollTo then
-    local t = 1 - clamp(state.rpmRollTimer / state.rpmRollDuration, 0, 1)
-    local eased = smoothstep(t)
-    shownRpm = math.floor(lerp(state.rpmRollFrom, state.rpmRollTo, eased) + 0.5)
-  end
-
+  local systemOpe = math.floor(computeSystemOpe() + 0.5)
+  local points = math.max(0, math.floor(tonumber(state.points) or 0))
+  local titleFont = getTopDisplayFont()
+  local topY = viewportY + math.floor(4 * uiScale)
   local centerX = viewportX + viewportW * 0.5
-  love.graphics.setFont(rpmFont)
-  local rpmText = tostring(shownRpm)
+  love.graphics.setFont(titleFont)
+  local pointsText = tostring(points)
   setColorScaled(swatch.bright, 1, 1)
-  drawText(rpmText, centerX - rpmFont:getWidth(rpmText) * 0.5, rpmY)
+  drawText(pointsText, centerX - titleFont:getWidth(pointsText) * 0.5, topY)
   love.graphics.setFont(font)
-  local rpmLabelY = rpmY + rpmFont:getHeight() - math.floor(8 * uiScale)
+  local pointsLabelY = topY + titleFont:getHeight() - math.floor(8 * uiScale)
   setColorScaled(palette.text, 1, 0.9)
-  drawText("rpm", centerX - font:getWidth("rpm") * 0.5, rpmLabelY)
-  ui.feedbackAnchors.rpm.x = centerX
-  ui.feedbackAnchors.rpm.y = rpmY + math.floor(rpmFont:getHeight() * 0.3)
-
-  local objectiveText = string.format("objective: get to %d rpm", state.objectiveRpm)
-  local objectiveX = viewportX + viewportW - font:getWidth(objectiveText) - math.floor(10 * uiScale)
-  local objectiveY = viewportY + math.floor(10 * uiScale)
-  setColorScaled(palette.text, 1, 0.92)
-  drawText(objectiveText, objectiveX, objectiveY)
-  local highText = string.format("highest rpm %d", state.highestRpm)
+  drawText("points", centerX - font:getWidth("points") * 0.5, pointsLabelY)
+  local opeY = pointsLabelY + lineH + math.floor(2 * uiScale)
+  local opeText = "system ope " .. tostring(systemOpe)
   setColorScaled(palette.text, 1, 0.85)
-  drawText(highText, viewportX + viewportW - font:getWidth(highText) - math.floor(10 * uiScale), objectiveY + lineH + math.floor(2 * uiScale))
-  if state.runComplete then
-    local outcomeText = state.runOutcome == "collapse" and "collapse" or (state.runWon and "goal reached" or "goal missed")
-    local rewardText = string.format("reward %d", state.rewardRpm)
-    setColorScaled(state.runOutcome == "collapse" and swatch.bright or swatch.brightest, 1, 0.95)
-    drawText(outcomeText, viewportX + viewportW - font:getWidth(outcomeText) - math.floor(10 * uiScale), objectiveY + lineH * 2 + math.floor(4 * uiScale))
-    setColorScaled(swatch.brightest, 1, 0.95)
-    drawText(rewardText, viewportX + viewportW - font:getWidth(rewardText) - math.floor(10 * uiScale), objectiveY + lineH * 3 + math.floor(6 * uiScale))
-  end
+  drawText(opeText, centerX - font:getWidth(opeText) * 0.5, opeY)
+  ui.feedbackAnchors.points.x = centerX
+  ui.feedbackAnchors.points.y = topY + math.floor(titleFont:getHeight() * 0.3)
+  ui.feedbackAnchors.systemOpe.x = centerX
+  ui.feedbackAnchors.systemOpe.y = opeY + math.floor(lineH * 0.5)
 
   local cardW = math.floor(Config.CARD_W * uiScale)
   local cardH = math.floor(Config.CARD_H * uiScale)
@@ -2347,29 +2175,29 @@ local function drawHud()
   local statsTitleY = cardY - lineH * 2 - math.floor(14 * uiScale)
   local statsValueY = statsTitleY + lineH + math.floor(2 * uiScale)
   local statColW = fixedHandW / 3
-  local turnX = fixedStartX + statColW * 0.5
+  local epochX = fixedStartX + statColW * 0.5
   local energyX = fixedStartX + statColW * 1.5
   local heatX = fixedStartX + statColW * 2.5
 
-  local turnTitle = "turn"
+  local epochTitle = "epoch"
   local energyTitle = "energy"
   local heatTitle = "heat"
-  local turnValue = string.format("%d/%d", micro.displayTurn, state.maxTurns)
+  local epochValue = string.format("%d/%d", micro.displayEpoch or state.epoch, state.maxEpochs)
   local energyValue = tostring(micro.displayEnergy)
   local heatValue = string.format("%d/%d", micro.displayHeat, state.heatCap)
 
   setColorScaled(palette.text, 1, 0.82)
-  drawText(turnTitle, turnX - font:getWidth(turnTitle) * 0.5, statsTitleY)
+  drawText(epochTitle, epochX - font:getWidth(epochTitle) * 0.5, statsTitleY)
   drawText(energyTitle, energyX - font:getWidth(energyTitle) * 0.5, statsTitleY)
   drawText(heatTitle, heatX - font:getWidth(heatTitle) * 0.5, statsTitleY)
   setColorScaled(palette.text, 1, 0.95)
-  drawText(turnValue, turnX - font:getWidth(turnValue) * 0.5, statsValueY)
+  drawText(epochValue, epochX - font:getWidth(epochValue) * 0.5, statsValueY)
   drawText(energyValue, energyX - font:getWidth(energyValue) * 0.5, statsValueY)
   drawText(heatValue, heatX - font:getWidth(heatValue) * 0.5, statsValueY)
 
   local anchorY = statsTitleY - lineH - math.floor(10 * uiScale)
-  ui.feedbackAnchors.turn.x = turnX
-  ui.feedbackAnchors.turn.y = anchorY
+  ui.feedbackAnchors.epoch.x = epochX
+  ui.feedbackAnchors.epoch.y = anchorY
   ui.feedbackAnchors.energy.x = energyX
   ui.feedbackAnchors.energy.y = anchorY
   ui.feedbackAnchors.heat.x = heatX
@@ -2409,15 +2237,15 @@ local function drawHud()
   endBtn.h = math.floor(Config.END_TURN_H * uiScale)
   endBtn.x = viewportX + viewportW - endBtn.w - math.floor(10 * uiScale)
   endBtn.y = viewportY + viewportH - endBtn.h - math.floor(12 * uiScale)
-  local canEndTurn = (not state.runComplete) and (not micro.lockInput)
-  local endHovered = canEndTurn and pointInRect(mouseX, mouseY, endBtn)
-  local endAlpha = canEndTurn and 1 or 0.45
+  local canEndEpoch = (not state.runComplete) and (state.phase == "planning") and (not micro.lockInput)
+  local endHovered = canEndEpoch and pointInRect(mouseX, mouseY, endBtn)
+  local endAlpha = canEndEpoch and 1 or 0.45
   setColorScaled(swatch.brightest, 1, (endHovered and 1 or 0.92) * endAlpha)
   love.graphics.rectangle("fill", endBtn.x, endBtn.y, endBtn.w, endBtn.h)
   setColorScaled(swatch.darkest, 1, (endHovered and 1 or 0.88) * endAlpha)
   love.graphics.rectangle("line", endBtn.x, endBtn.y, endBtn.w, endBtn.h)
   setColorScaled(swatch.darkest, 1, endAlpha)
-  local endLabel = "end turn"
+  local endLabel = "end epoch"
   drawText(endLabel, endBtn.x + math.floor((endBtn.w - font:getWidth(endLabel)) * 0.5), endBtn.y + math.floor((endBtn.h - lineH) * 0.5))
 
   local sequence = micro.sequence
@@ -2426,17 +2254,6 @@ local function drawHud()
   if sequence and sequence.type == "card_play" then
     handCards = sequence.handSnapshot
     handMode = "card_play"
-  elseif sequence and sequence.type == "turn_transition" then
-    if sequence.phase == "discard_hand" then
-      handCards = sequence.handSnapshot
-      handMode = "discard"
-    elseif sequence.phase == "draw_hand" then
-      handCards = state.hand
-      handMode = "draw"
-    else
-      handCards = {}
-      handMode = "none"
-    end
   end
 
   local handCount = #handCards
@@ -2444,7 +2261,7 @@ local function drawHud()
   local startX = viewportX + math.floor((viewportW - handW) * 0.5)
   local hoveredTooltipLines
   local hoveredTooltipBtn
-  local moonCount = getRunMoonBodyCount()
+  local moonCount = getRunBodyCount()
   local interactive = (handMode == "live") and (not micro.lockInput) and (not state.runComplete)
 
   for i = #ui.cardButtons, handCount + 1, -1 do
@@ -2516,11 +2333,14 @@ local function drawHud()
     if handMode == "card_play" and i == sequence.handIndex then
       cardCost = sequence.cost
     end
-    local moonBonus = previewMoonRpmBonus(cardDef, i)
-    local playable = cardDef and (state.energy >= cardCost) and (not state.runComplete)
+    local moonBonus = previewBodyCardBonus(cardDef, i)
+    local playable = cardDef and canResolveCardNow(cardDef) and (state.energy >= cardCost) and (not state.runComplete)
     local cardAlpha = alpha
     if handMode == "live" then
       cardAlpha = cardAlpha * (playable and 1 or 0.45)
+      if state.phase ~= "planning" then
+        cardAlpha = cardAlpha * 0.55
+      end
     end
     if not skipDraw and cardAlpha > 0 and cardDef then
       drawCardFace(btn, cardDef, {
@@ -2540,7 +2360,7 @@ local function drawHud()
         {pre = cardDef.tooltip or "", hi = "", post = ""},
         {pre = "cost ", hi = tostring(cardCost), post = " energy"},
         {pre = "heat ", hi = heatSign .. tostring(heatDelta), post = ""},
-        {pre = "class ", hi = tostring(cardDef.orbitClass or "-"), post = ""},
+        {pre = "type ", hi = tostring(cardDef.type or cardDef.orbitClass or "-"), post = ""},
       }
     end
   end
@@ -2580,7 +2400,7 @@ local function drawHud()
       alpha = 1,
       cost = sequence.cost,
       moonCount = moonCount,
-      moonBonus = previewMoonRpmBonus(sequence.cardDef, sequence.handIndex),
+      moonBonus = previewBodyCardBonus(sequence.cardDef, sequence.handIndex),
     })
   end
 
@@ -2599,7 +2419,7 @@ function drawMainMenu()
   local viewportH = Config.GAME_H * scale
 
   local title = "orbit protocol"
-  local titleFont = getRpmDisplayFont()
+  local titleFont = getTopDisplayFont()
   love.graphics.setFont(titleFont)
   setColorScaled(swatch.bright, 1, 1)
   drawText(title, viewportX + viewportW * 0.5 - titleFont:getWidth(title) * 0.5, viewportY + math.floor(viewportH * 0.22))
@@ -2704,7 +2524,7 @@ function drawDeckMenu()
   end
   local hoveredTooltipLines
   local hoveredTooltipBtn
-  local moonCount = getRunMoonBodyCount()
+  local moonCount = getRunBodyCount()
 
   for i = 1, 3 do
     local colX = contentX + (i - 1) * (colW + colGap)
@@ -2785,7 +2605,7 @@ function drawDeckMenu()
             alpha = alpha,
             cost = cardDef and cardDef.cost or 0,
             moonCount = moonCount,
-            moonBonus = previewMoonRpmBonus(cardDef),
+            moonBonus = previewBodyCardBonus(cardDef),
             footerText = footerText,
           })
 
@@ -2798,7 +2618,7 @@ function drawDeckMenu()
                 {pre = cardDef.tooltip, hi = "", post = ""},
                 {pre = "cost ", hi = tostring(cardDef.cost), post = " energy"},
                 {pre = "heat ", hi = tostring(cardDef.heat or 0), post = ""},
-                {pre = "class ", hi = tostring(cardDef.orbitClass or "-"), post = ""},
+                {pre = "type ", hi = tostring(cardDef.type or cardDef.orbitClass or "-"), post = ""},
                 {pre = "deck copies ", hi = tostring(deckCounts[cardId] or 0), post = ""},
                 {pre = "click ", hi = actionLine, post = removable and " to inventory" or ""},
               }
@@ -2810,7 +2630,7 @@ function drawDeckMenu()
                 {pre = cardDef.tooltip, hi = "", post = ""},
                 {pre = "cost ", hi = tostring(cardDef.cost), post = " energy"},
                 {pre = "heat ", hi = tostring(cardDef.heat or 0), post = ""},
-                {pre = "class ", hi = tostring(cardDef.orbitClass or "-"), post = ""},
+                {pre = "type ", hi = tostring(cardDef.type or cardDef.orbitClass or "-"), post = ""},
                 {pre = "inventory copies ", hi = tostring(inventoryCounts[cardId] or 0), post = ""},
                 {pre = "click ", hi = actionLine, post = addable and " to deck" or ""},
               }
@@ -2821,7 +2641,7 @@ function drawDeckMenu()
                 {pre = cardDef.tooltip, hi = "", post = ""},
                 {pre = "cost ", hi = tostring(cardDef.cost), post = " energy"},
                 {pre = "heat ", hi = tostring(cardDef.heat or 0), post = ""},
-                {pre = "class ", hi = tostring(cardDef.orbitClass or "-"), post = ""},
+                {pre = "type ", hi = tostring(cardDef.type or cardDef.orbitClass or "-"), post = ""},
                 {pre = "shop ", hi = tostring(price), post = ""},
                 {pre = "owned ", hi = tostring(inventoryCounts[cardId] or 0), post = ""},
                 {pre = "click ", hi = "buy", post = ""},
@@ -2857,9 +2677,9 @@ function drawEndGame()
   setColorScaled(swatch.brightest, 1, 0.92)
   love.graphics.rectangle("line", panelX, panelY, panelW, panelH)
 
-  local title = state.runOutcome == "collapse" and "run collapsed" or (state.runWon and "goal reached" or "run complete")
-  local scoreText = "score " .. tostring(state.highestRpm) .. " rpm"
-  local rewardText = "reward +" .. tostring(state.rewardRpm)
+  local title = state.runOutcome == "collapse" and "run collapsed" or "run complete"
+  local scoreText = "points " .. tostring(state.points or 0)
+  local rewardText = "reward +" .. tostring(state.rewardPoints or 0)
   local currencyText = "currency " .. tostring(state.currency)
 
   setColorScaled(swatch.brightest, 1, 1)
@@ -2927,18 +2747,23 @@ function getOrbiterTooltipLayout()
     end
   end
 
-  local boardRpm = orbiter.boardRpm or 0
-  if runtime.cardRun and runtime.cardRun.effectiveBodyRpm then
-    boardRpm = runtime.cardRun:effectiveBodyRpm(orbiter)
+  local bodyOpe = 0
+  local bodyYield = 0
+  if runtime.cardRun and runtime.cardRun.effectiveBodyOpe then
+    bodyOpe = runtime.cardRun:effectiveBodyOpe(orbiter)
   end
-  local visualRpm = (orbiter.visualRpm or (orbiter.speed * Config.RAD_PER_SECOND_TO_RPM)) * (1 + totalBoost)
+  if runtime.cardRun and runtime.cardRun.effectiveBodyYieldPerOrbit then
+    bodyYield = runtime.cardRun:effectiveBodyYieldPerOrbit(orbiter)
+  end
+  local angularSpeed = math.abs((orbiter.speed or 0) * (1 + totalBoost))
   local visualRadius = orbiter.visualRadius
   if not visualRadius then
     visualRadius = select(1, orbiterVisualRadius(orbiter))
   end
   local detailLines = {
-    {pre = "board rpm ", hi = string.format("%.2f", boardRpm), post = ""},
-    {pre = "visual rpm ", hi = string.format("%.2f", visualRpm), post = ""},
+    {pre = "ope ", hi = tostring(bodyOpe), post = ""},
+    {pre = "yield/orbit ", hi = tostring(bodyYield), post = ""},
+    {pre = "angular speed ", hi = string.format("%.2f", angularSpeed), post = ""},
     {pre = "orbit radius ", hi = string.format("%.0f px", orbiter.radius), post = ""},
     {pre = "body radius ", hi = string.format("%.1f px", visualRadius or 0), post = ""},
     {pre = "active boost ", hi = string.format("%+d%%", boostPercent), post = ""},
@@ -3354,7 +3179,7 @@ end
 
 function love.load()
   love.graphics.setDefaultFilter("nearest", "nearest")
-  uiFont = love.graphics.newFont("font_gothic.ttf", Config.UI_FONT_SIZE, "mono")
+  uiFont = patchFontWidth(love.graphics.newFont("font_gothic.ttf", Config.UI_FONT_SIZE, "mono"))
   uiFont:setFilter("nearest", "nearest")
   love.graphics.setFont(uiFont)
   love.graphics.setLineStyle("rough")
@@ -3410,13 +3235,10 @@ function love.update(dt)
   updateUpgradeFx(dt)
   state.time = state.time + dt
   state.planetBounceTime = math.max(0, state.planetBounceTime - dt)
-  if not micro.rpmHold then
-    state.rpmRollTimer = math.max(0, state.rpmRollTimer - dt)
-  end
   updateMicroInteractions(dt)
 
-  if runtime.orbiters then
-    runtime.orbiters:update(dt)
+  if runtime.cardRun and runtime.cardRun.update then
+    runtime.cardRun:update(dt)
   end
 
   local ripples = state.speedWaveRipples
@@ -3509,8 +3331,8 @@ function love.mousepressed(x, y, button)
     return
   end
 
-  if pointInRect(x, y, ui.endTurnBtn) and not state.runComplete then
-    endPlayerTurn()
+  if pointInRect(x, y, ui.endTurnBtn) and (not state.runComplete) and state.phase == "planning" then
+    endEpochFromUi()
     return
   end
 

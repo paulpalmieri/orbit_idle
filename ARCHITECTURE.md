@@ -22,10 +22,10 @@ This refactor reduces `main.lua` local-variable pressure by moving static data a
   - Handles boost stacks, speed multipliers, and orbit advancement.
 
 - `game/systems/card_run.lua`
-  - Owns run lifecycle (`startCardRun`, turn transitions, collapse/completion).
+  - Owns run lifecycle (`startCardRun`, epoch transitions, collapse/completion).
   - Owns deck/hand/discard flow and card effects.
   - Pulls the active run deck from deck-builder state at run start.
-  - Owns body RPM aggregation and high-score tracking for run state.
+  - Owns body OPE aggregation, epoch simulation payouts, and point tracking.
   - Awards end-of-run currency rewards once per run.
 
 - `game/systems/deck_builder.lua`
@@ -50,10 +50,10 @@ This refactor reduces `main.lua` local-variable pressure by moving static data a
 
 Core flow:
 
-1. `runtime.orbiters:update(dt)` advances all bodies.
+1. `runtime.cardRun:update(dt)` advances calm planning motion and epoch simulation motion.
 2. `runtime.cardRun` is called from UI/input actions:
    - `playCard`
-   - `endPlayerTurn`
+   - `endEpoch`
    - `startCardRun`
 3. `runtime.deckBuilder` is called from deck menu UI actions.
 4. Rendering/UI reads from shared `state` only.

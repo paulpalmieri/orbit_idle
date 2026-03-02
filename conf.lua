@@ -1,6 +1,6 @@
 function love.conf(t)
   t.identity = "orbit_idle"
-  t.window.title = "Orbit Idle"
+  t.window.title = "orbit idle"
   t.window.width = 1280
   t.window.height = 720
   t.window.highdpi = true
