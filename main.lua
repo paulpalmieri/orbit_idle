@@ -1587,37 +1587,8 @@ function drawPlanet()
 end
 
 function drawLightSource(frontPass)
-  local lightX, lightY, lightZ, projectedZ, px, py, projectScale = lightSourceProjected()
-  if frontPass then
-    if projectedZ <= 0 then
-      return
-    end
-  elseif projectedZ > 0 then
-    return
-  end
-
-  local baseLight = clamp(cameraLightAt(lightX, lightY, lightZ) * 1.08, 0.45, 1.25)
-  local coreR = math.max(2, Config.LIGHT_SOURCE_MARKER_RADIUS * projectScale)
-  local haloR = coreR * 1.9
-
-  setLitColorDirect(swatch.bright[1], swatch.bright[2], swatch.bright[3], baseLight, 0.42)
-  love.graphics.circle("fill", px, py, haloR, 32)
-  setLitColorDirect(swatch.brightest[1], swatch.brightest[2], swatch.brightest[3], baseLight, 0.95)
-  love.graphics.circle("fill", px, py, coreR, 24)
-
-  if state.selectedLightSource then
-    local pulse = 0.5 + 0.5 * math.sin(state.time * 3.2)
-    local ringR = lightSourceHitRadius(projectScale) + pulse * (2.8 * projectScale)
-    setLitColorDirect(
-      Config.SELECTED_ORBIT_COLOR[1],
-      Config.SELECTED_ORBIT_COLOR[2],
-      Config.SELECTED_ORBIT_COLOR[3],
-      clamp(baseLight * 1.04, 0.4, 1.25),
-      0.92
-    )
-    love.graphics.setLineWidth(1)
-    love.graphics.circle("line", px, py, ringR, 36)
-  end
+  -- Keep light influence active, but do not render a visible light body.
+  return
 end
 
 function activeSpeedWaveRippleParams()
@@ -1695,11 +1666,20 @@ function drawOrbitalTrail(orbiter, trailLen, headAlpha, tailAlpha, originX, orig
     if prevX then
       local t = i / stepCount
       local alpha = lerp(headAlpha or 0.35, tailAlpha or 0.02, t)
-      local midAngle = a + stepAngle * 0.5
-      local r, g, b = computeOrbiterColor(midAngle)
-      local trailZ = (prevZ + z) * 0.5
-      local trailLight = lightScale or cameraLightAt((prevX + x) * 0.5, (prevY + y) * 0.5, trailZ)
-      setLitColorDirect(r, g, b, trailLight, alpha)
+      local gradientT = clamp(t, 0, 1)
+      local r, g, b
+      if gradientT < 0.5 then
+        local blend = gradientT / 0.5
+        r = lerp(swatch.brightest[1], swatch.bright[1], blend)
+        g = lerp(swatch.brightest[2], swatch.bright[2], blend)
+        b = lerp(swatch.brightest[3], swatch.bright[3], blend)
+      else
+        local blend = (gradientT - 0.5) / 0.5
+        r = lerp(swatch.bright[1], swatch.mid[1], blend)
+        g = lerp(swatch.bright[2], swatch.mid[2], blend)
+        b = lerp(swatch.bright[3], swatch.mid[3], blend)
+      end
+      setColorDirect(r, g, b, alpha)
       local sx0, sy0 = projectWorldPoint(prevX, prevY, prevZ)
       local sx1, sy1 = projectWorldPoint(x, y, z)
       love.graphics.line(sx0, sy0, sx1, sy1)
